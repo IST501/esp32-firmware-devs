@@ -515,7 +515,7 @@ void drawMainView() {
         "-----------",
         "User:" + USER_CODE,
         "OS:" + WORK_ORDER,
-        "PN:" + PART_NUMBER + " (" + PARTS_PER_CYCLE + ")",
+        "PN (" + PARTS_PER_CYCLE + "):" + PART_NUMBER,
         "PARTS:" + GOOD_PARTS_PRODUCED + "/" + BADS_PARTS_PRODUCED
     };
     int lineCount = sizeof(lines) / sizeof(lines[0]);
@@ -790,7 +790,7 @@ void loop() {
       }
         
 
-      if (currentMillis - lastWifiRetryMillis >= 10000) { // tenta a cada 5s
+      if (currentMillis - lastWifiRetryMillis >= 10000) { // tenta a cada 10s
           lastWifiRetryMillis = currentMillis;
           previousMessageMillis = currentMillis;
 
