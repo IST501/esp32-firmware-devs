@@ -164,7 +164,10 @@ const unsigned long debounce_keypad = 1000; // Intervalo de 1 seg de debounce pa
 const unsigned long message_interval = 3000; // Intervalo de 3 seg de exibição da mensagem no display após interação do usuário
 
 const unsigned long starKeyResetInterval = 3000; // Intervalo de tempo colocado para caso o botão * fique segurado por mais de 3 segundos ele reinicia
-unsigned long starKeyPressedMillis = 0; // Variável que armazena o momento em que o botão foi * foi apertado
+unsigned long starKeyPressedMillis = 0; // Variável que armazena o momento em que o botão * foi apertado
+
+const unsigned long zeroKeyClearInterval = 3000; // Segurar 0 por 3 segundos executa o clear_setup
+unsigned long zeroKeyPressedMillis = 0; // Variável que armazena o momento em que o botão 0 foi apertado
 
 // Variável para armazenar o tempo da última solicitação
 unsigned long previousReadMillis = 0;
@@ -173,6 +176,45 @@ unsigned long previousDebounceMillis = 0;
 unsigned long previousMessageMillis = 0;
 
 const char* filename = "/config.txt"; // Arquivo de Configuração
+
+
+// ============================================================
+// FIX 2 — Função centralizada para resetar todos os input modes
+// Limpa todas as flags e dados de todos os fluxos (A, B, C, D, #)
+// sem tocar no inputMode — quem chama decide o valor dele.
+// ============================================================
+void resetAllInputModes() {
+
+  // Fluxo A
+  nonConfirmingPartsTypeInputMode = false;
+  nonConfirmingPartsQuantInputMode = false;
+  nonConfirmingPartsTypeCode = "";
+  nonConfirmingPartsQuant = "";
+
+  // Fluxo B
+  deletePartsTypeInputMode = false;
+  deletePartsQuantInputMode = false;
+  deletePartsTypeCode = "";
+  deletePartsQuant = "";
+
+  // Fluxo C
+  operatorInputMode = false;
+
+  // Fluxo D
+  operationInputMode = false;
+  workOrderInputMode = false;
+  partsToProdInputMode = false;
+  partsQuantityPerPNInputMode = false;
+  currentPNInputIndex = 0;
+  for (int i = 0; i < MAX_PART_NUMBERS; i++) {
+    partsQuantityPerPN[i] = 0;
+  }
+
+  // Fluxo #
+  interventionInputMode = false;
+  interventionCode = "";
+}
+
 
 // Função para salvar apenas um parâmetro específico
 void saveConfig(String param, String value) {
@@ -515,7 +557,7 @@ void drawMainView() {
             fullString += "PN(" + String(CURRENT_PN_INDEX + 1) + "/" + String(PART_NUMBERS_COUNT) + "): " + String(currentPN->parts_to_produce) + "/" + String(currentPN->good_parts_produced) + "/" + String(currentPN->bad_parts_produced) + "\n";
         }
     } else {
-        fullString += "PN (0/0):";
+        fullString += "PN (0/0/0):";
     }
 
     char textBuffer[256];
@@ -561,7 +603,7 @@ struct ApiResult {
 	StaticJsonDocument<1024> json;
 };
 
-ApiResult sendApiRequest(StaticJsonDocument<1024>& payload, const String& route) {
+ApiResult sendApiRequest(JsonDocument& payload, const String& route) {
 
 	ApiResult result;
 	result.httpCode = -1;
@@ -801,10 +843,11 @@ void handleSyncWorkStation(ApiResult& result) {
     validateConfigs = true;
     Serial.println(msg);
 
+    // Exibe mensagem de sincronização na primeira vez que conecta com sucesso,
+    // mas NÃO retorna — continua para popular os dados normalmente.
     if (!previousValidateState) {
         drawCenteredText(msg, 1);
         Serial.println("Workstation synchronized successfully!");
-        return;
     }
 
     if (!obj["intervention_data"].isNull()) {
@@ -904,10 +947,23 @@ void handleSyncWorkStation(ApiResult& result) {
 
 void sync_workstation(){
 
-  StaticJsonDocument<1024> payload;
+  DynamicJsonDocument payload(256);
 
   ApiResult result = sendApiRequest(payload, "sync_workstation/");
   Serial.println("SYNC WORKSTATION RESULT: " + String(result.httpCode));
+
+  // Log temporário para debug do zeramento
+  String rawSync;
+  serializeJson(result.json, rawSync);
+  Serial.println("SYNC RAW: " + rawSync);
+
+  // Guarda se o JSON foi parseado com sucesso antes de processar.
+  // Evita zerar variáveis locais quando a deserialização falha silenciosamente.
+  if (result.httpCode > 0 && !result.hasJson) {
+    Serial.println("SYNC: JSON parse failed, skipping to avoid clearing local state.");
+    return;
+  }
+
   handleSyncWorkStation(result);
 }
 
@@ -970,6 +1026,7 @@ void setup() {
   }
 }
 
+// MARK: LOOP
 void loop() {
 
   server.handleClient();
@@ -1044,57 +1101,15 @@ void loop() {
       }
   }
 
-  // Caso fique mais de 30 segundos no modo input ele sai e zera o parâmetro que estava sendo digitado
-  if (currentMillis - previousInputMillis > inputModeInterval){
+  if (inputMode && currentMillis - previousInputMillis > inputModeInterval) {
 
+    resetAllInputModes();
     inputMode = false;
 
-    // A
-    if (nonConfirmingPartsTypeInputMode || nonConfirmingPartsQuantInputMode) {
-      nonConfirmingPartsTypeCode = "";
-      nonConfirmingPartsQuant = "";
-      
-      nonConfirmingPartsTypeInputMode = false;
-      nonConfirmingPartsQuantInputMode = false;
-    } 
-
-    // B
-    if (deletePartsTypeInputMode || deletePartsQuantInputMode) {
-      nonConfirmingPartsTypeCode = "";
-      nonConfirmingPartsQuant = "";
-      
-      deletePartsTypeInputMode = false;
-      deletePartsQuantInputMode = false;
-    } 
-
-    // C
-    if (operatorInputMode) {
-      USER_CODE = "";
-      operatorInputMode = false;
-    }
-
-    // D
-    if (operationInputMode || workOrderInputMode || partsToProdInputMode){
-      OPERATION = "";
-      PRODUCTION_ORDER = "";
-      
-      for (int i = 0; i < MAX_PART_NUMBERS; i++) {
-        partsQuantityPerPN[i] = 0;
-      }
-      currentPNInputIndex = 0;
-      
-      operationInputMode = false;
-      workOrderInputMode = false;
-      partsToProdInputMode = false;
-      partsQuantityPerPNInputMode = false;
-      clearPartNumbers();
-    }
-
-    // #
-    if (interventionInputMode){
-      interventionInputMode = false;
-      interventionCode = "";
-    }
+    OPERATION = "";
+    PRODUCTION_ORDER = "";
+    USER_CODE = "";
+    clearPartNumbers();
   }
 
   int sensorState1 = digitalRead(SENSOR_PIN_1);
@@ -1143,7 +1158,6 @@ void loop() {
       // --- Pulse Signal + Linked Steps ---
       else if (SENSOR_READ_TYPE == "pulse_signal_linked") {
 
-        // Peça passou pelo primeiro estágio: envia conforme e sobe o step
         if (step == 0) {
           Serial.println("Peça passou pelo primeiro estágio do modo step!");
 
@@ -1159,14 +1173,12 @@ void loop() {
           previousPartMillis = currentMillis;
         }
 
-        // Peça nova chegou sem o sensor 2 ter confirmado: última peça era não conforme
         else if (step == 1) {
           Serial.println("Última peça não conforme pelo modo step!");
 
           StaticJsonDocument<1024> payload;
           ApiResult result;
 
-          // Atualiza última peça para NÃO conforme
           payload["method_key"] = "insert_data";
           payload["status"] = "0";
           payload["production_note_type"] = "1";
@@ -1175,7 +1187,6 @@ void loop() {
 
           payload.clear();
 
-          // Insere nova peça como conforme (step continua 1)
           Serial.println("Peça passou pelo primeiro estágio do modo step!");
           payload["method_key"] = "insert_data";
           payload["status"] = "1";
@@ -1188,7 +1199,7 @@ void loop() {
         }
       }
 
-      // --- Continuos Signal (reservado para implementação futura) ---
+      // --- Continuos Signal ---
       else if (SENSOR_READ_TYPE == "continuos_signal") {
         if (lastSignalState == false) {
           Serial.println("Peça Conforme, modo contínuo!");
@@ -1207,16 +1218,12 @@ void loop() {
       }
     }
 
-    // Bloco apenas para controlar o valor do lastSignalState no modo continuos_signal, para evitar múltiplas contagens enquanto a peça estiver no sensor
     if (sensorState1 == HIGH && lastSignalState == true && SENSOR_READ_TYPE == "continuos_signal") {
       lastSignalState = false;
     }
 
     // ========================================
     // MARK: LEITURA DO SENSOR 2
-    // Usado apenas no modo pulse_signal_linked
-    // para confirmar que a peça passou pelo
-    // segundo estágio e reseta o step para 0
     // ========================================
     if (sensorState2 == LOW && currentMillis - previousPartMillis >= SENSOR_INTERVAL.toInt()) {
       if (SENSOR_READ_TYPE == "pulse_signal_linked") {
@@ -1257,20 +1264,6 @@ void loop() {
         
         if (key >= '1' && key <= '9') {
           int selectedIndex = (key - '0') - 1;
-          
-          if (selectedIndex < PART_NUMBERS_COUNT) {
-            nonConfirmingPartsTypeCode = String(PART_NUMBERS[selectedIndex].id);
-            
-            Serial.print("PN selecionado para não conforme: ");
-            Serial.println(PART_NUMBERS[selectedIndex].name);
-            
-            nonConfirmingPartsTypeInputMode = false;
-            nonConfirmingPartsQuantInputMode = true;
-            previousDebounceMillis = currentMillis;
-          }
-        }
-        else if (key == '0') {
-          int selectedIndex = 9;
           
           if (selectedIndex < PART_NUMBERS_COUNT) {
             nonConfirmingPartsTypeCode = String(PART_NUMBERS[selectedIndex].id);
@@ -1338,20 +1331,6 @@ void loop() {
         
         if (key >= '1' && key <= '9') {
           int selectedIndex = (key - '0') - 1;
-          
-          if (selectedIndex < PART_NUMBERS_COUNT) {
-            deletePartsTypeCode = String(PART_NUMBERS[selectedIndex].id);
-            
-            Serial.print("PN selecionado para deletar: ");
-            Serial.println(PART_NUMBERS[selectedIndex].name);
-            
-            deletePartsTypeInputMode = false;
-            deletePartsQuantInputMode = true;
-            previousDebounceMillis = currentMillis;
-          }
-        }
-        else if (key == '0') {
-          int selectedIndex = 9;
           
           if (selectedIndex < PART_NUMBERS_COUNT) {
             deletePartsTypeCode = String(PART_NUMBERS[selectedIndex].id);
@@ -1474,7 +1453,23 @@ void loop() {
             JsonObject obj = result.json.as<JsonObject>();
             
             if (obj["get_more_info"] == 1) {
-              
+
+              // Popula PART_NUMBERS a partir da resposta do servidor,
+              // garantindo que o array está atualizado antes de verificar a quantidade
+              clearPartNumbers();
+              JsonObject pns = obj["part_numbers"].as<JsonObject>();
+              for (JsonPair kv : pns) {
+                if (PART_NUMBERS_COUNT >= MAX_PART_NUMBERS) break;
+                JsonObject pn = kv.value().as<JsonObject>();
+                PART_NUMBERS[PART_NUMBERS_COUNT].id                = pn["id"].as<int>();
+                PART_NUMBERS[PART_NUMBERS_COUNT].name              = pn["name"].as<String>();
+                PART_NUMBERS[PART_NUMBERS_COUNT].parts_to_produce  = 0;
+                PART_NUMBERS[PART_NUMBERS_COUNT].good_parts_produced = 0;
+                PART_NUMBERS[PART_NUMBERS_COUNT].bad_parts_produced  = 0;
+                PART_NUMBERS_COUNT++;
+              }
+              Serial.println("PNs carregados da resposta: " + String(PART_NUMBERS_COUNT));
+
               if (PART_NUMBERS_COUNT > 1) {
                 partsQuantityPerPNInputMode = true;
                 currentPNInputIndex = 0;
@@ -1649,11 +1644,10 @@ void loop() {
     ///////////////////////////////////// KEYPAD ////////////////////////////////////////////////
     /////////////////////////////////////////////////////////////////////////////////////////////
 
-    // Seleção de Part Number (Botões 1-9 e 0)
-    if (key >= '0' && key <= '9' && currentMillis - previousDebounceMillis >= debounce_keypad) {
+    if (key >= '1' && key <= '9' && currentMillis - previousDebounceMillis >= debounce_keypad) {
       
       int keyNumber = key - '0';
-      int targetIndex = (keyNumber == 0) ? 9 : keyNumber - 1;
+      int targetIndex = keyNumber - 1;
       
       if (targetIndex < PART_NUMBERS_COUNT) {
         CURRENT_PN_INDEX = targetIndex;
@@ -1686,11 +1680,9 @@ void loop() {
 
     // Tecla A - Peças não conformes
     else if (key == 'A' && currentMillis - previousDebounceMillis >= debounce_keypad) {
+      resetAllInputModes(); // FIX 2: garante estado limpo antes de abrir novo fluxo
       inputMode = true;
       nonConfirmingPartsTypeInputMode = true;
-      nonConfirmingPartsQuantInputMode = false;
-      nonConfirmingPartsTypeCode = "";
-      nonConfirmingPartsQuant = "";
 
       previousInputMillis = currentMillis;
       previousDebounceMillis = currentMillis;
@@ -1698,11 +1690,9 @@ void loop() {
 
     // Tecla B - Deletar peças
     else if (key == 'B' && currentMillis - previousDebounceMillis >= debounce_keypad) {
+      resetAllInputModes(); // FIX 2: garante estado limpo antes de abrir novo fluxo
       inputMode = true;
       deletePartsTypeInputMode = true;
-      deletePartsQuantInputMode = false;
-      deletePartsTypeCode = "";
-      deletePartsQuant = "";
 
       previousInputMillis = currentMillis;
       previousDebounceMillis = currentMillis;
@@ -1710,6 +1700,7 @@ void loop() {
     
     // Tecla C - Trocar operador
     else if (key == 'C' && currentMillis - previousDebounceMillis >= debounce_keypad) {
+      resetAllInputModes(); // FIX 2: garante estado limpo antes de abrir novo fluxo
       inputMode = true;
       operatorInputMode = true;
       USER_CODE = "";
@@ -1720,27 +1711,21 @@ void loop() {
 
     // Tecla D - Setup de operação / ordem de produção
     else if (key == 'D' && currentMillis - previousDebounceMillis >= debounce_keypad) {
+      resetAllInputModes(); // FIX 2: garante estado limpo antes de abrir novo fluxo
       inputMode = true;
       operationInputMode = true;
-
       OPERATION = "";
       PRODUCTION_ORDER = "";
 
-      for (int i = 0; i < MAX_PART_NUMBERS; i++) {
-        partsQuantityPerPN[i] = 0;
-      }
-      currentPNInputIndex = 0;
-      
       previousInputMillis = currentMillis;
       previousDebounceMillis = currentMillis;
     }
     
     // Tecla # - Abertura de Intervenção
     else if (key == '#' && currentMillis - previousDebounceMillis >= debounce_keypad) {
+      resetAllInputModes(); // FIX 2: garante estado limpo antes de abrir novo fluxo
       inputMode = true;
       interventionInputMode = true;
-
-      interventionCode = "";
       
       previousInputMillis = currentMillis;
       previousDebounceMillis = currentMillis;
@@ -1751,6 +1736,16 @@ void loop() {
     // =====================================================
     else if (key == '*' && currentMillis - previousDebounceMillis >= debounce_keypad) {
         starKeyPressedMillis = currentMillis;
+        previousDebounceMillis = currentMillis;
+    }
+
+    // =====================================================
+    // DETECÇÃO DO PRIMEIRO TOQUE no botão 0
+    // 0 curto → não faz nada
+    // 0 longo (3s) → envia clear_setup para a API
+    // =====================================================
+    else if (key == '0' && currentMillis - previousDebounceMillis >= debounce_keypad) {
+        zeroKeyPressedMillis = currentMillis;
         previousDebounceMillis = currentMillis;
     }
 
@@ -1788,6 +1783,55 @@ void loop() {
         else {
             int segundosRestantes = (starKeyResetInterval / 1000) - ((currentMillis - starKeyPressedMillis) / 1000);
             drawCenteredText(("Hold to restart\n" + String(segundosRestantes) + "s...").c_str(), 1);
+        }
+    }
+
+    // =====================================================
+    // MONITORAMENTO DO BOTÃO 0 ENQUANTO ESTIVER SEGURADO
+    // =====================================================
+    if (zeroKeyPressedMillis > 0) {
+
+        bool zeroHeld = false;
+        keypad.getKeys();
+        for (int i = 0; i < LIST_MAX; i++) {
+            if (keypad.key[i].kchar == '0' &&
+                (keypad.key[i].kstate == PRESSED || keypad.key[i].kstate == HOLD)) {
+                zeroHeld = true;
+                break;
+            }
+        }
+
+        if (!zeroHeld) {
+            // Solto antes de 3s → não faz nada
+            zeroKeyPressedMillis = 0;
+        }
+        else if (currentMillis - zeroKeyPressedMillis >= zeroKeyClearInterval) {
+            // Segurado 3s+ → envia clear_setup para a API
+            zeroKeyPressedMillis = 0;
+
+            Serial.println("Enviando clear_setup...");
+            drawCenteredText("Clearing\nsetup...", 1);
+
+            StaticJsonDocument<1024> payload;
+            payload["method_key"] = "clear_setup";
+
+            ApiResult result = sendApiRequest(payload, "setup_controller/");
+
+            if (handleSimpleApiResult(result, true)) {
+                USER_CODE = "";
+                USER_NAME = "";
+                OPERATION = "";
+                PRODUCTION_ORDER = "";
+                clearPartNumbers();
+                Serial.println("Setup cleared!");
+            }
+
+            previousMessageMillis = currentMillis;
+        }
+        else {
+            // Ainda segurado, ainda não chegou em 3s → mostra contagem regressiva
+            int segundosRestantes = (zeroKeyClearInterval / 1000) - ((currentMillis - zeroKeyPressedMillis) / 1000);
+            drawCenteredText(("Hold to clear\nsetup\n" + String(segundosRestantes) + "s...").c_str(), 1);
         }
     }
   }

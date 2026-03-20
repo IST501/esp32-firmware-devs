@@ -56,11 +56,12 @@ String SSID_NAME = "SEU_SSID";
 String PASSWORD = "SEU_PASSWORD";
 String SERVER_IP = "IP_SERVIDOR";
 String SERVER_PORT = "8000";
-String SENSOR_INTERVAL = "1000"; // Intevalo com padrão de 1 seg para cada leitura do sensor de ciclo
-String DISPLAY_TYPE = "oled_096"; // MARK: Seleção do tipo de display tendo como padrão 0.96", por enquanto não está implementada
-String LINKED_STEPS_MODE = "0"; // Modo criado para trabalhar no formato da máquina na empresa XPTO quem tem duas etapas executadas por uma máquina, sendo a segunda etapa a responsável por um teste de qualidade
+String SENSOR_INTERVAL = "1000"; // Intervalo com padrão de 1 seg para cada leitura do sensor de ciclo
+String DISPLAY_TYPE = "oled_096"; // Display 0.96 polegadas como default
+String SENSOR_READ_TYPE = "pulse_signal"; // Tipo de leitura: pulse_signal | pulse_signal_linked | continuos_signal
 
 int step = 0;
+bool lastSignalState = false; // Usada pelo modo continuos_signal
 
 // O valor de "" é por conta de não existir nenhum id no banco que tenha o valor "", com isso, não encontrando nenhuma operação, nenhum user e nenhuma PRODUCTION_ORDER
 String USER_CODE = "";
@@ -86,7 +87,7 @@ int CURRENT_PN_INDEX = 0;     // PN atualmente selecionado
 
 
 // MARK: Keypad variaveis
-bool inputMode = false; // Variável utilizada para não atulizar o display quando estiver em modo de inputMode
+bool inputMode = false; // Variável utilizada para não atualizar o display quando estiver em modo de inputMode
 unsigned long previousInputMillis = 0; // Variável que vai assumir o valor de millis toda vez que for acionada uma condição de input
 const unsigned long inputModeInterval = 30000; // Variável de tempo máximo de 30 para digitar os inputs desejados
 
@@ -141,7 +142,7 @@ byte pin_column[COLUMN_NUM] = {27, 14, 12, 13};
 Keypad keypad = Keypad(makeKeymap(keys), pin_rows, pin_column, ROW_NUM, COLUMN_NUM);
 
 #define DEBUG_LED 2           // Digital Output para o led de debug (azul)
-#define INTERVENTION_LED 15   // Digital Ouput para o led de interveções (vermelho)
+#define INTERVENTION_LED 15   // Digital Output para o led de intervenções (vermelho)
 #define SENSOR_PIN_1 4          // Digital Input para realizar as leituras de peça
 #define SENSOR_PIN_2 19        // Digital Input para realizar as leituras de peça
 
@@ -160,7 +161,7 @@ WorkStationState currentWorkStationState = RUNNING;
 
 const unsigned long read_interval = 10; // Intervalo de tempo de 10 milissegundos para cada leitura
 const unsigned long debounce_keypad = 1000; // Intervalo de 1 seg de debounce para os botões no teclado
-const unsigned long message_interval = 3000; // Intervalo de 2 seg de exibição da mensagem no display após intereção do usuário
+const unsigned long message_interval = 3000; // Intervalo de 3 seg de exibição da mensagem no display após interação do usuário
 
 const unsigned long starKeyResetInterval = 3000; // Intervalo de tempo colocado para caso o botão * fique segurado por mais de 3 segundos ele reinicia
 unsigned long starKeyPressedMillis = 0; // Variável que armazena o momento em que o botão foi * foi apertado
@@ -172,6 +173,45 @@ unsigned long previousDebounceMillis = 0;
 unsigned long previousMessageMillis = 0;
 
 const char* filename = "/config.txt"; // Arquivo de Configuração
+
+
+// ============================================================
+// FIX 2 — Função centralizada para resetar todos os input modes
+// Limpa todas as flags e dados de todos os fluxos (A, B, C, D, #)
+// sem tocar no inputMode — quem chama decide o valor dele.
+// ============================================================
+void resetAllInputModes() {
+
+  // Fluxo A
+  nonConfirmingPartsTypeInputMode = false;
+  nonConfirmingPartsQuantInputMode = false;
+  nonConfirmingPartsTypeCode = "";
+  nonConfirmingPartsQuant = "";
+
+  // Fluxo B
+  deletePartsTypeInputMode = false;
+  deletePartsQuantInputMode = false;
+  deletePartsTypeCode = "";
+  deletePartsQuant = "";
+
+  // Fluxo C
+  operatorInputMode = false;
+
+  // Fluxo D
+  operationInputMode = false;
+  workOrderInputMode = false;
+  partsToProdInputMode = false;
+  partsQuantityPerPNInputMode = false;
+  currentPNInputIndex = 0;
+  for (int i = 0; i < MAX_PART_NUMBERS; i++) {
+    partsQuantityPerPN[i] = 0;
+  }
+
+  // Fluxo #
+  interventionInputMode = false;
+  interventionCode = "";
+}
+
 
 // Função para salvar apenas um parâmetro específico
 void saveConfig(String param, String value) {
@@ -197,10 +237,9 @@ void saveConfig(String param, String value) {
     else if (param == "DISPLAY_TYPE"){
       DISPLAY_TYPE = value;
     }
-    else if (param == "LINKED_STEPS_MODE") {
-      LINKED_STEPS_MODE = (value == "on") ? "1" : "0"; // Se o checkbox estiver marcado, define como "1", senão "0"
+    else if (param == "SENSOR_READ_TYPE") {
+      SENSOR_READ_TYPE = value;
     }
-
     else {
       Serial.println("Parâmetro inválido!");
       return;
@@ -219,7 +258,7 @@ void saveConfig(String param, String value) {
     file.println("SERVER_PORT=" + SERVER_PORT);
     file.println("SENSOR_INTERVAL=" + SENSOR_INTERVAL);
     file.println("DISPLAY_TYPE=" + DISPLAY_TYPE);
-    file.println("LINKED_STEPS_MODE=" + LINKED_STEPS_MODE);
+    file.println("SENSOR_READ_TYPE=" + SENSOR_READ_TYPE);
     
     file.close();
   
@@ -227,7 +266,7 @@ void saveConfig(String param, String value) {
 }
 
 
-//Função para carregar configurações do arquivo
+// Função para carregar configurações do arquivo
 void loadConfig() {
     File file = SPIFFS.open(filename, FILE_READ);
     if (!file) {
@@ -240,7 +279,7 @@ void loadConfig() {
       saveConfig("SERVER_PORT", SERVER_PORT);
       saveConfig("SENSOR_INTERVAL", SENSOR_INTERVAL);
       saveConfig("DISPLAY_TYPE", DISPLAY_TYPE);
-      saveConfig("LINKED_STEPS_MODE", LINKED_STEPS_MODE);
+      saveConfig("SENSOR_READ_TYPE", SENSOR_READ_TYPE);
   
       return;
     }
@@ -270,16 +309,14 @@ void loadConfig() {
       else if (line.startsWith("DISPLAY_TYPE=")){
         DISPLAY_TYPE = line.substring(13);
       }
-      else if (line.startsWith("LINKED_STEPS_MODE=")) {
-        LINKED_STEPS_MODE = line.substring(18);
+      else if (line.startsWith("SENSOR_READ_TYPE=")) {
+        SENSOR_READ_TYPE = line.substring(17);
       }
-
     }
     
     file.close();
   
     Serial.println("Configurações carregadas da SPIFFS:");
-  
     Serial.println("WORK_STATION: " + WORK_STATION);
     Serial.println("SSID_NAME: " + SSID_NAME);
     Serial.println("PASSWORD: " + PASSWORD);
@@ -287,8 +324,7 @@ void loadConfig() {
     Serial.println("SERVER_PORT: " + SERVER_PORT);
     Serial.println("SENSOR_INTERVAL: " + SENSOR_INTERVAL);
     Serial.println("DISPLAY_TYPE: " + DISPLAY_TYPE);
-    Serial.println("LINKED_STEPS_MODE: " + LINKED_STEPS_MODE);
-
+    Serial.println("SENSOR_READ_TYPE: " + SENSOR_READ_TYPE);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -393,15 +429,18 @@ String generateConfigPage() {
           <label>Server IP:</label><br>
           <input type="text" name="server-ip" value=")rawliteral" + SERVER_IP + R"rawliteral("><br><br>
           <label>Server Port:</label><br>
-          <input type="text" name="server-port" value=")rawliteral" + SERVER_PORT + R"rawliteral("><br><br
-          
+          <input type="text" name="server-port" value=")rawliteral" + SERVER_PORT + R"rawliteral("><br><br>
+
+          <label>Sensor Read Type:</label><br>
+          <select name="sensor_read_type">
+            <option value="pulse_signal" )rawliteral" + (SENSOR_READ_TYPE == "pulse_signal" ? "selected" : "") + R"rawliteral(>Pulse Signal</option>
+            <option value="pulse_signal_linked" )rawliteral" + (SENSOR_READ_TYPE == "pulse_signal_linked" ? "selected" : "") + R"rawliteral(>Pulse Signal + Linked Steps</option>
+            <option value="continuos_signal" )rawliteral" + (SENSOR_READ_TYPE == "continuos_signal" ? "selected" : "") + R"rawliteral(>Continuos Signal</option>
+          </select><br><br>
+
           <label>Sensor Interval (s):</label><br>
-          <input type="number" name="sensor-interval" min="0.5" step="0.5" value=")rawliteral" + String(SENSOR_INTERVAL.toFloat()/1000.0, 1) + R"rawliteral("><br><br>       
-          <label>
-            <input type="checkbox" name="linked-steps" )rawliteral" + (LINKED_STEPS_MODE == "1" ? "checked" : "") + R"rawliteral(>
-            LinkedSteps
-          </label>
-          </label><br><br>
+          <input type="number" name="sensor-interval" min="0.5" step="0.5" value=")rawliteral" + String(SENSOR_INTERVAL.toFloat()/1000.0, 1) + R"rawliteral("><br><br>
+
           <button type="submit">Save and Restart</button>
       </form>
     </body>
@@ -409,13 +448,6 @@ String generateConfigPage() {
 
   return page;
 }
-
-// Isso fazia parte do html, mas foi removido porque não precisou mudar nada no display para o maior funcionar
-// <label>Display Type:</label><br>
-// <select name="display" id="display">
-//   <option value="oled_096" )rawliteral" + (DISPLAY_TYPE == "oled_096" ? "selected" : "") + R"rawliteral(> OLED 0.96" </option>
-//   <option value="oled_24" )rawliteral" + (DISPLAY_TYPE == "oled_24" ? "selected" : "") + R"rawliteral(> OLED 2.4" </option>
-// </select><br><br>
 
 // Função para exibir a página de configuração Wi-Fi
 void handleRoot() {
@@ -431,7 +463,7 @@ void handleSave() {
   String newServerPort = server.arg("server-port");
   String newSensorInterval = String(server.arg("sensor-interval").toFloat() * 1000);
   String newDisplayType = server.arg("display");
-  String newLinkedStepsMode = server.arg("linked-steps");
+  String newSensorReadType = server.arg("sensor_read_type");
 
   if (newSSID.length() > 0 && newPass.length() > 0 && newWorkStation.length() > 0 && newServerIp.length() > 0 && newServerPort.length() > 0) {
             
@@ -444,7 +476,7 @@ void handleSave() {
       if (newDisplayType.length() > 0) {
           saveConfig("DISPLAY_TYPE", newDisplayType);
       }
-      saveConfig("LINKED_STEPS_MODE", newLinkedStepsMode);
+      saveConfig("SENSOR_READ_TYPE", newSensorReadType);
 
       server.send(200, "text/html", "<h2>Configuration saved! Restarting...</h2>");
       delay(2000);
@@ -473,45 +505,38 @@ void initDisplay() {
 }
 
 void drawCenteredText(const char* text, uint8_t textSize) {
-  display->clearDisplay();  // Limpa a tela
+  display->clearDisplay();
   display->setTextSize(textSize);
   display->setTextColor(WHITE);
 
-  // Variáveis para armazenar cada linha do texto
   int16_t x1, y1;
   uint16_t textWidth, textHeight;
 
-  // Criamos uma cópia mutável do texto para manipular as quebras de linha
   char textBuffer[128]; 
   strncpy(textBuffer, text, sizeof(textBuffer));  
-  textBuffer[sizeof(textBuffer) - 1] = '\0'; // Garante terminação segura
+  textBuffer[sizeof(textBuffer) - 1] = '\0';
 
-  // Conta o número de linhas quebrando o texto nos espaços ('\n')
   char* line = strtok(textBuffer, "\n");
   int lineCount = 0;
-  char* lines[10]; // Suporta até 10 linhas
+  char* lines[10];
 
   while (line != NULL && lineCount < 10) {
     lines[lineCount++] = line;
     line = strtok(NULL, "\n");
   }
 
-  // Calcula a altura total do bloco de texto
-  int totalHeight = lineCount * (8 * textSize); // Cada linha tem 8px de altura no tamanho 1
-
-  // Posição Y inicial para centralizar todo o bloco de texto
+  int totalHeight = lineCount * (8 * textSize);
   int16_t startY = (SCREEN_HEIGHT - totalHeight) / 2;
 
-  // Desenha cada linha separadamente
   for (int i = 0; i < lineCount; i++) {
     display->getTextBounds(lines[i], 0, 0, &x1, &y1, &textWidth, &textHeight);
     int16_t x = (SCREEN_WIDTH - textWidth) / 2;
-    int16_t y = startY + i * (8 * textSize); // Move cada linha para baixo
+    int16_t y = startY + i * (8 * textSize);
     display->setCursor(x, y);
     display->println(lines[i]);
   }
 
-  display->display(); // Atualiza o display
+  display->display();
 }
 
 void drawMainView() {
@@ -523,17 +548,15 @@ void drawMainView() {
                         "OP:" + OPERATION + "\n" +
                         "OS:" + PRODUCTION_ORDER + "\n";
     
-    // Adicionar informações do Part Number atual
     if (PART_NUMBERS_COUNT > 0) {
         PartNumberData* currentPN = getCurrentPartNumber();
         if (currentPN != nullptr) {
-            fullString += "PN(" + String(CURRENT_PN_INDEX + 1) + "/" + String(PART_NUMBERS_COUNT) + "): " + String(currentPN->parts_to_produce) + "/" + String(currentPN->good_parts_produced) +  "/" + String(currentPN->bad_parts_produced) + "\n";
+            fullString += "PN(" + String(CURRENT_PN_INDEX + 1) + "/" + String(PART_NUMBERS_COUNT) + "): " + String(currentPN->parts_to_produce) + "/" + String(currentPN->good_parts_produced) + "/" + String(currentPN->bad_parts_produced) + "\n";
         }
     } else {
         fullString += "PN (0/0):";
     }
 
-    // Copia para buffer para usar strtok
     char textBuffer[256];
     fullString.toCharArray(textBuffer, sizeof(textBuffer));
 
@@ -583,7 +606,7 @@ ApiResult sendApiRequest(StaticJsonDocument<1024>& payload, const String& route)
 	result.httpCode = -1;
 	result.hasJson = false;
 
-	// Campos comuns e aplicada a lógica de que caso algum valor seja "" ele envia 0 para que o servidor possa processar
+	// Campos comuns
   payload["work_station"] = WORK_STATION;
   payload["user_name"] = USER_CODE.length() ? USER_CODE.toInt() : 0;
   payload["operation"] = OPERATION.length() ? OPERATION.toInt() : 0;
@@ -591,12 +614,6 @@ ApiResult sendApiRequest(StaticJsonDocument<1024>& payload, const String& route)
   payload["rssi"] = WiFi.RSSI();
 
 	String requestUrl = "http://" + SERVER_IP + ":" + SERVER_PORT + "/" + route;
-
-  // Mostrar na Serial o a URL e o payload gerado
-  // Serial.println("URL: " + requestUrl);
-	// Serial.print("Sending: ");
-	// serializeJsonPretty(payload, Serial); 
-	// Serial.println();
 
 	HTTPClient http;
 	if (!http.begin(requestUrl)) {
@@ -623,14 +640,12 @@ ApiResult sendApiRequest(StaticJsonDocument<1024>& payload, const String& route)
 }
 
 
-
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////// Handlers //////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 bool handleSimpleApiResult(ApiResult& result, bool showSuccessMessage = true, bool successfulBlink = true) {
 
-    // === network-error ===
     if (result.httpCode < 0) {
       Serial.println("network-error");
       return false;
@@ -641,7 +656,6 @@ bool handleSimpleApiResult(ApiResult& result, bool showSuccessMessage = true, bo
 
     if (msg) {
 
-        // === erro HTTP ou erro 404 proposital do servidor ===
         if (result.httpCode < 200 || result.httpCode >= 300) {
             Serial.print("HTTP error: ");
             Serial.println(result.httpCode);
@@ -652,19 +666,15 @@ bool handleSimpleApiResult(ApiResult& result, bool showSuccessMessage = true, bo
             return false;
         }
         else {
-            // Caso não tenha nenhum specific handle ele faz a lógica simples
-            // Como não é todos os casos que eu quero exibir a mensagem do servidor, passo a flag como false
             if (showSuccessMessage){
                 drawCenteredText(msg, 1);
                 previousMessageMillis = millis();
             }
 
-            // Ativa o piscar azul do led
             if (successfulBlink) {
               successfulResponse();
             }
                            
-            // Mostrar na Serial o JSON de response enviado pelo servidor
             Serial.print("Response JSON: ");
             serializeJsonPretty(obj, Serial);
             Serial.println();
@@ -681,7 +691,6 @@ bool handleSimpleApiResult(ApiResult& result, bool showSuccessMessage = true, bo
 
 void handleChangeOperation(ApiResult& result) {
 
-    // === network-error ===
     if (result.httpCode < 0) {
 
         OPERATION = "";
@@ -707,7 +716,6 @@ void handleChangeOperation(ApiResult& result) {
         return;
     }
 
-    // === erro HTTP ou erro 404 proposital do servidor ===
     if (result.httpCode < 200 || result.httpCode >= 300) {
 
         OPERATION = "";
@@ -725,13 +733,8 @@ void handleChangeOperation(ApiResult& result) {
         return;
     }
 
-    // =========================
-    // === RESPOSTA OK (200) ===
-    // =========================
-
     Serial.println("HANDLE CHANGE OPERATION OK");
 
-    // 🔹 Nenhuma PRODUCTION_ORDER foi digitada
     if (PRODUCTION_ORDER == "") {
 
         inputMode = false;
@@ -739,8 +742,6 @@ void handleChangeOperation(ApiResult& result) {
         workOrderInputMode = false;
         partsToProdInputMode = false;
     }
-
-    // 🔹 PRODUCTION_ORDER não existe → pedir quantidade
     else if (obj["get_more_info"] == 1) {
 
         partsToProdInputMode = true;
@@ -748,18 +749,11 @@ void handleChangeOperation(ApiResult& result) {
 
         operationInputMode = false;
         workOrderInputMode = false;
-
-        // PARTS_TO_PROD = "";
     }
-
-    // 🔹 PRODUCTION_ORDER existe → valores prontos
     else if (obj["get_more_info"] == 0) {
 
         partsToProdInputMode = false;
         inputMode = false;
-
-        // PARTS_TO_PROD = String(obj["parts_quantity"].as<int>());
-        // GOOD_PARTS_PRODUCED = obj["good_parts_produced_quant"].as<int>();
 
         operationInputMode = false;
         workOrderInputMode = false;
@@ -775,7 +769,7 @@ void handleChangeOperation(ApiResult& result) {
 }
 
 void handlestopIntervention(ApiResult& result) {
-// === network-error ===
+
     if (result.httpCode < 0) {
 
         Serial.println(result.httpCode);
@@ -796,28 +790,22 @@ void handlestopIntervention(ApiResult& result) {
         return;
     }
 
-    // === erro HTTP ou erro 404 proposital do servidor ===
     if (result.httpCode < 200 || result.httpCode >= 300) {
 
         Serial.println(result.httpCode);
         Serial.println(msg);
         drawCenteredText(msg, 1);
     }
-    
-    // Response do HTTP com código de sucesso
     else {
         currentWorkStationState = RUNNING;
 
-        // Acende LED azul e apaga LED vermelho
         digitalWrite(DEBUG_LED, HIGH);
         digitalWrite(INTERVENTION_LED, LOW);
-
 
         Serial.println(result.httpCode);
         Serial.println(msg);
         drawCenteredText(msg, 1);
     }
-    
 }
 
 void handleSyncWorkStation(ApiResult& result) {
@@ -825,9 +813,6 @@ void handleSyncWorkStation(ApiResult& result) {
     bool previousValidateState = validateConfigs;
     yield();
 
-    // ==========================
-    // ERRO DE REDE
-    // ==========================
     if (result.httpCode < 0) {
         validateConfigs = false;
         drawCenteredText("SERVER \n NOT FOUND!", 1);
@@ -852,9 +837,6 @@ void handleSyncWorkStation(ApiResult& result) {
         return;
     }
 
-    // ==========================
-    // SUCESSO
-    // ==========================
     validateConfigs = true;
     Serial.println(msg);
 
@@ -864,13 +846,9 @@ void handleSyncWorkStation(ApiResult& result) {
         return;
     }
 
-    // ==========================
-    // INTERVENÇÃO
-    // ==========================
     if (!obj["intervention_data"].isNull()) {
         currentWorkStationState = INTERVENTION;
 
-        // Apaga LED azul e acende LED vermelho
         digitalWrite(DEBUG_LED, LOW);
         digitalWrite(INTERVENTION_LED, HIGH);
 
@@ -878,16 +856,9 @@ void handleSyncWorkStation(ApiResult& result) {
         Serial.println("Workstation in intervention state!");
         return;
     }
-
-    // ==========================
-    // SEM INTERVENÇÃO (RUNNING)
-    // ==========================
-    // Se chegou aqui, não há intervenção ativa
-    // Garantir que os LEDs estejam no estado correto
     else if (currentWorkStationState != RUNNING) {
         currentWorkStationState = RUNNING;
         
-        // Acende LED azul e apaga LED vermelho
         digitalWrite(DEBUG_LED, HIGH);
         digitalWrite(INTERVENTION_LED, LOW);
         
@@ -895,14 +866,8 @@ void handleSyncWorkStation(ApiResult& result) {
         Serial.println("Intervention closed remotely");
     }
 
-    // ==========================
-    // LIMPA PART NUMBERS
-    // ==========================
     clearPartNumbers();
 
-    // ==========================
-    // USUÁRIO / OPERAÇÃO
-    // ==========================
     USER_CODE = obj["user_data"]["id"].isNull()
         ? ""
         : String(obj["user_data"]["id"].as<int>());
@@ -915,11 +880,8 @@ void handleSyncWorkStation(ApiResult& result) {
         ? ""
         : String(obj["operation_data"]["id"].as<int>());
 
-
     Serial.println("zibs");
-    // ==========================
-    // PART NUMBERS DA OPERAÇÃO
-    // ==========================
+
     JsonObject opPNs = obj["operation_data"]["part_numbers"].as<JsonObject>();
 
     for (JsonPair kv : opPNs) {
@@ -937,14 +899,10 @@ void handleSyncWorkStation(ApiResult& result) {
         PART_NUMBERS_COUNT++;
     }
 
-    // Essa lógica é para garantir que o índice do PN atual não esteja fora do range de PNS
     if (PART_NUMBERS_COUNT <= CURRENT_PN_INDEX){
       CURRENT_PN_INDEX = 0;
     }
     
-    // ==========================
-    // ORDEM DE PRODUÇÃO
-    // ==========================
     JsonVariant poVar = obj["production_order_data"];
 
     if (!poVar.isNull()) {
@@ -971,9 +929,6 @@ void handleSyncWorkStation(ApiResult& result) {
         PRODUCTION_ORDER = "";
     }
 
-    // ==========================
-    // DEBUG OPCIONAL
-    // ==========================
     for (int i = 0; i < PART_NUMBERS_COUNT; i++) {
         Serial.printf(
             "PN %d | %s | ToProd:%d | OK:%d | NOK:%d \n",
@@ -988,22 +943,19 @@ void handleSyncWorkStation(ApiResult& result) {
 
 void sync_workstation(){
 
-  // payload vazio, porque para esse envio só preciso do nome da workstation
   StaticJsonDocument<1024> payload;
 
   ApiResult result = sendApiRequest(payload, "sync_workstation/");
   Serial.println("SYNC WORKSTATION RESULT: " + String(result.httpCode));
   handleSyncWorkStation(result);
-
 }
 
 void setup() {
 
   Serial.begin(115200);
 
-  // Inicializa o watchdog no core 0
   esp_task_wdt_init(WDT_TIMEOUT, true);  
-  esp_task_wdt_add(NULL);  // Adiciona a tarefa atual ao watchdog
+  esp_task_wdt_add(NULL);
 
   if (!SPIFFS.begin(true)) {
     Serial.println("Erro ao montar SPIFFS!");
@@ -1013,14 +965,13 @@ void setup() {
   loadConfig();
   initDisplay();
   
-  pinMode(DEBUG_LED, OUTPUT);        // Configura o led de debug
-  pinMode(INTERVENTION_LED, OUTPUT); // Configura o led de intervenções
-  pinMode(SENSOR_PIN_1, INPUT_PULLUP); // Configura o pino da entrada com resistor pull-up (sinal HIGH)
-  pinMode(SENSOR_PIN_2, INPUT_PULLUP); // Configura o pino da entrada com resistor pull-up (sinal HIGH)
+  pinMode(DEBUG_LED, OUTPUT);
+  pinMode(INTERVENTION_LED, OUTPUT);
+  pinMode(SENSOR_PIN_1, INPUT_PULLUP);
+  pinMode(SENSOR_PIN_2, INPUT_PULLUP);
 
-  bool ledState = false;  // Variável para armazenar o estado do LED
+  bool ledState = false;
 
-  // Conecte-se ao WiFi
   WiFi.begin(SSID_NAME.c_str(), PASSWORD.c_str());
   Serial.println("Connecting to WiFi...");
   drawCenteredText("Connecting to WiFi...", 1);
@@ -1033,27 +984,22 @@ void setup() {
     Serial.print(".");
   }
 
-  // Obtendo o MAC Address
   uint8_t mac[6];
   WiFi.macAddress(mac);
 
-  // Criando o SSID dinâmico com os 3 últimos bytes do MAC
   sprintf(apSSID, "ESP32_%02X%02X%02X", mac[3], mac[4], mac[5]);
 
-  // Ativando o Access Point com o novo SSID
   WiFi.softAP(apSSID, apPassword);
   Serial.println("Hotspot ativo!");
   Serial.print("Endereço IP do AP: ");
   Serial.println(WiFi.softAPIP());
 
-  // Configuração do servidor web
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSave);
   server.begin();
   
   sync_workstation();
 
-  // Define estado inicial dos LEDs baseado no estado atual
   if (currentWorkStationState == INTERVENTION) {
       digitalWrite(DEBUG_LED, LOW);
       digitalWrite(INTERVENTION_LED, HIGH);
@@ -1068,7 +1014,6 @@ void loop() {
   server.handleClient();
 	esp_task_wdt_reset();
 
-  // Determina a frequência do void loop
   unsigned long currentMillis = millis();
 	if (currentMillis - previousReadMillis < read_interval) {
 		return;
@@ -1079,19 +1024,16 @@ void loop() {
   // MODO STANDBY - BLOQUEIA TUDO
   // ========================================
   if (currentWorkStationState == STANDBY) {
-      // Mantém display fixo
       static unsigned long lastStandbyDisplay = 0;
       if (currentMillis - lastStandbyDisplay > 5000) {
           drawCenteredText("STANDBY MODE\n\nPress * to\nresume", 1);
           lastStandbyDisplay = currentMillis;
       }
       
-      // Só aceita tecla * para sair
       char key = keypad.getKey();
       if (key == '*') {
           currentWorkStationState = RUNNING;
           
-          // Acende LED azul e apaga LED vermelho
           digitalWrite(DEBUG_LED, HIGH);
           digitalWrite(INTERVENTION_LED, LOW);
           
@@ -1100,12 +1042,10 @@ void loop() {
           previousMessageMillis = currentMillis;
       }
       
-      // Não faz mais nada
       return;
   }
 
 
-  // Verifica se o Wifi ainda está funcionando, caso não, ele tenta reconectar a cada 10 segundos
   if (WiFi.status() != WL_CONNECTED) {
 
       static unsigned long lastWifiRetryMillis = 0;
@@ -1113,9 +1053,8 @@ void loop() {
       if (currentMillis - previousMessageMillis > message_interval){
         drawCenteredText(("AP:" + String(apSSID) + "\n --- \n Wifi disconnected!").c_str(), 1);
       }
-        
 
-      if (currentMillis - lastWifiRetryMillis >= 10000) { // tenta a cada 5s
+      if (currentMillis - lastWifiRetryMillis >= 10000) {
           lastWifiRetryMillis = currentMillis;
           previousMessageMillis = currentMillis;
 
@@ -1128,13 +1067,6 @@ void loop() {
       return;
   }
 
-  // A função sync_workstation verifica se as configurações iniciais
-  // (SERVER_IP, SERVER_PORT e WORK_STATION) estão corretas.
-  // Ela também valida o estado atual do sistema, identificando se havia
-  // alguma intervenção em aberto antes do dispositivo ser desligado.
-  //
-  // Caso a validação falhe, a função será chamada novamente a cada 5 segundos
-  // até que todas as configurações estejam corretas.
   static unsigned long lastValidateMillis = 0;
 
   if (!validateConfigs) {
@@ -1144,11 +1076,6 @@ void loop() {
       }
       return;
   }
-
-  // Rotina periódica de verificação:
-  // Mesmo após a validação inicial ter sido concluída com sucesso,
-  // o sistema executa a função sync_workstation a cada 60 segundos
-  // para garantir que a comunicação com o servidor continue estável.
   else {
       if (currentMillis - lastValidateMillis >= 2000 && !inputMode) {
           lastValidateMillis = currentMillis;
@@ -1156,58 +1083,22 @@ void loop() {
       }
   }
 
-  // Caso fique mais de 30 segundos no modo input ele sai e zera o parâmetro que estava sendo digitado
-  if (currentMillis - previousInputMillis > inputModeInterval){
+  // ============================================================
+  // FIX 1 — partsQuantityPerPNInputMode adicionado na condição D
+  // FIX 2 — substituído por resetAllInputModes() centralizado
+  // FIX 3 — bloco B corrigido para usar deletePartsTypeCode/Quant
+  // ============================================================
+  if (currentMillis - previousInputMillis > inputModeInterval) {
 
+    // FIX 2: resetAllInputModes() limpa todas as flags de todos os fluxos
+    resetAllInputModes();
     inputMode = false;
 
-    // A
-    if (nonConfirmingPartsTypeInputMode || nonConfirmingPartsQuantInputMode) {
-      nonConfirmingPartsTypeCode = "";
-      nonConfirmingPartsQuant = "";
-      
-      nonConfirmingPartsTypeInputMode = false;
-      nonConfirmingPartsQuantInputMode = false;
-    } 
-
-    // B
-    if (deletePartsTypeInputMode || deletePartsQuantInputMode) {
-      nonConfirmingPartsTypeCode = "";
-      nonConfirmingPartsQuant = "";
-      
-      deletePartsTypeInputMode = false;
-      deletePartsQuantInputMode = false;
-    } 
-
-    // C
-    if (operatorInputMode) {
-      USER_CODE = "";
-      operatorInputMode = false;
-    }
-
-    // D
-    if (operationInputMode || workOrderInputMode || partsToProdInputMode){
-      OPERATION = "";
-      PRODUCTION_ORDER = "";
-      
-      // Limpar quantidades
-      for (int i = 0; i < MAX_PART_NUMBERS; i++) {
-        partsQuantityPerPN[i] = 0;
-      }
-      currentPNInputIndex = 0;
-      
-      operationInputMode = false;
-      workOrderInputMode = false;
-      partsToProdInputMode = false;
-      partsQuantityPerPNInputMode = false;
-      clearPartNumbers();
-    }
-
-    // #
-    if (interventionInputMode){
-      interventionInputMode = false;
-      interventionCode = "";
-    }
+    // Limpa dados de estado do fluxo D que ficam fora do resetAllInputModes
+    OPERATION = "";
+    PRODUCTION_ORDER = "";
+    USER_CODE = "";
+    clearPartNumbers();
   }
 
   int sensorState1 = digitalRead(SENSOR_PIN_1);
@@ -1228,15 +1119,17 @@ void loop() {
   }
   else if (currentWorkStationState == RUNNING) {
 
-    // Após o intervalo de exibição de uma mensagem de interação é exibida a mensagem principal
     if (currentMillis - previousMessageMillis > message_interval && !inputMode && starKeyPressedMillis == 0) {
         drawMainView();
     }
 
-    // 🔹 SENSOR 1 → peça conforme
+    // ========================================
+    // MARK: LEITURA DO SENSOR 1
+    // ========================================
     if (sensorState1 == LOW && currentMillis - previousPartMillis >= SENSOR_INTERVAL.toInt()) {
 
-      if (LINKED_STEPS_MODE == "0") {
+      // --- Pulse Signal (modo simples) ---
+      if (SENSOR_READ_TYPE == "pulse_signal") {
 
         Serial.println("Peça Conforme, modo simples!");
 
@@ -1251,93 +1144,91 @@ void loop() {
         previousPartMillis = currentMillis;
       }
 
-      else if (LINKED_STEPS_MODE == "1"){
+      // --- Pulse Signal + Linked Steps ---
+      else if (SENSOR_READ_TYPE == "pulse_signal_linked") {
 
-        /*
-        Lógica para caso o LINKED_STEPS_MODE == "1"
+        if (step == 0) {
+          Serial.println("Peça passou pelo primeiro estágio do modo step!");
 
-        step	    Leitura	      Resultado
-        0	        sensor 1	    step=1 e manda sinal de peça conforme 
-        1	        sensor 1	    step=1, manda sinal para atualizar o valor da última peça e colocar ela como nao conforme e depois adiciona uma peça nova conforme
-        0	        sensor 2	    pulou o sensor 1, ignorar (não precisa elaborar código)
-        1	        sensor 2	    step=0
-        
-        */
+          StaticJsonDocument<1024> payload;
+          payload["method_key"] = "insert_data";
+          payload["status"] = "1";
+          payload["production_note_type"] = "1";
 
-        // Vai mandar um sinal de peça boa e mudar o step para 1
-        if (step == 0){
-            Serial.println("Peça passou pelo primeiro estágio do modo step!");
+          ApiResult result = sendApiRequest(payload, "api/");
+          handleSimpleApiResult(result, false);
 
-            StaticJsonDocument<1024> payload;
-            payload["method_key"] = "insert_data";
-            payload["status"] = "1";
-            payload["production_note_type"] = "1";
+          step = 1;
+          previousPartMillis = currentMillis;
+        }
 
-            ApiResult result = sendApiRequest(payload, "api/");
-            handleSimpleApiResult(result, false);
-
-            step = 1;
-      
-            previousPartMillis = currentMillis;
-          }
-
-        // Vai mandar um sinal de peça com defeito, pois o sinal de ok do teste não foi enviado e não colocou a variável step de volta para o valor 0
-        // Depois de enviar o sinal de peça ruim, é enviado um sinal de peça boa, pois peça ruim só troca o status da última peça, não insere uma nova
-        else if (step == 1){
-
+        else if (step == 1) {
           Serial.println("Última peça não conforme pelo modo step!");
 
           StaticJsonDocument<1024> payload;
           ApiResult result;
 
-          // Envia peça NÃO conforme
           payload["method_key"] = "insert_data";
           payload["status"] = "0";
           payload["production_note_type"] = "1";
-
           result = sendApiRequest(payload, "api/");
           handleSimpleApiResult(result, false);
 
+          payload.clear();
+
           Serial.println("Peça passou pelo primeiro estágio do modo step!");
+          payload["method_key"] = "insert_data";
+          payload["status"] = "1";
+          payload["production_note_type"] = "1";
+          result = sendApiRequest(payload, "api/");
+          handleSimpleApiResult(result, false);
 
-          // Mantém o step = 1, pois uma nova peça está sendo fabricada
           step = 1;
+          previousPartMillis = currentMillis;
+        }
+      }
 
-          payload.clear(); // Limpa o JSON antes de reutilizar
+      // --- Continuos Signal ---
+      else if (SENSOR_READ_TYPE == "continuos_signal") {
+        if (lastSignalState == false) {
+          Serial.println("Peça Conforme, modo contínuo!");
 
-          // Envia peça conforme
+          StaticJsonDocument<1024> payload;
           payload["method_key"] = "insert_data";
           payload["status"] = "1";
           payload["production_note_type"] = "1";
 
-          result = sendApiRequest(payload, "api/");
+          ApiResult result = sendApiRequest(payload, "api/");
           handleSimpleApiResult(result, false);
 
+          lastSignalState = true;
           previousPartMillis = currentMillis;
         }
       }
     }
-                    
-    // Verifica se o sensor está em nível lógico LOW.
-    // Caso o modo LINKED_STEPS_MODE esteja ativado ("1") e a variável `step` já esteja com o valor 1 (indicando que a primeira etapa foi concluída),
-    // o sistema NÃO envia o sinal de peça produzida. Nesse caso, a função apenas reseta a variável `step` para 0, preparando o fluxo para uma nova sequência de etapas.
+
+    if (sensorState1 == HIGH && lastSignalState == true && SENSOR_READ_TYPE == "continuos_signal") {
+      lastSignalState = false;
+    }
+
+    // ========================================
+    // MARK: LEITURA DO SENSOR 2
+    // ========================================
     if (sensorState2 == LOW && currentMillis - previousPartMillis >= SENSOR_INTERVAL.toInt()) {
-      if (LINKED_STEPS_MODE == "1"){
-        if (step == 1){
+      if (SENSOR_READ_TYPE == "pulse_signal_linked") {
+        if (step == 1) {
           Serial.println("Peça passou pela verificação do step!");
           step = 0;
         }
-        else if (step == 0){
+        else if (step == 0) {
           Serial.println("Não passou pela primeira etapa!");
         }
       }
       else {
-        Serial.println("LinkedStep Mode Desligado!");
+        Serial.println("Sensor 2 ignorado: modo pulse_signal_linked desligado.");
       }
       previousPartMillis = currentMillis;
     }
-
-
 
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1350,37 +1241,30 @@ void loop() {
       //////// INPUTS da tecla A ///////
       //////////////////////////////////
 
-      // Primeiro passo: selecionar o Part Number
       if (nonConfirmingPartsTypeInputMode) {
         
-        // Montar string com lista de PNs disponíveis
         String pnList = "Select PN and\npress A:\n-----\n";
         
         for (int i = 0; i < PART_NUMBERS_COUNT; i++) {
-          pnList += String(i + 1) + "-" + PART_NUMBERS[i].name + "\n"; // Limita nome a 10 chars
+          pnList += String(i + 1) + "-" + PART_NUMBERS[i].name + "\n";
         }
         
         drawCenteredText(pnList.c_str(), 1);
         
-        // Verificar se apertou um número de 1 a 9
         if (key >= '1' && key <= '9') {
-          int selectedIndex = (key - '0') - 1; // Converter char para índice
+          int selectedIndex = (key - '0') - 1;
           
-          // Verificar se o índice é válido
           if (selectedIndex < PART_NUMBERS_COUNT) {
             nonConfirmingPartsTypeCode = String(PART_NUMBERS[selectedIndex].id);
             
             Serial.print("PN selecionado para não conforme: ");
             Serial.println(PART_NUMBERS[selectedIndex].name);
             
-            // Avançar para próximo passo
             nonConfirmingPartsTypeInputMode = false;
             nonConfirmingPartsQuantInputMode = true;
             previousDebounceMillis = currentMillis;
           }
         }
-
-        // Botão 0 seleciona o 10º PN (se existir)
         else if (key == '0') {
           int selectedIndex = 9;
           
@@ -1397,10 +1281,8 @@ void loop() {
         }
       }
 
-      // Segundo passo: digitar quantidade
       else if (nonConfirmingPartsQuantInputMode) {
         
-        // Mostrar qual PN foi selecionado
         String selectedPNName = "";
         for (int i = 0; i < PART_NUMBERS_COUNT; i++) {
           if (String(PART_NUMBERS[i].id) == nonConfirmingPartsTypeCode) {
@@ -1421,12 +1303,11 @@ void loop() {
           StaticJsonDocument<1024> payload;
           ApiResult result;
 
-          // Enviar peça não conforme com o PN selecionado
           payload["method_key"] = "insert_data";
           payload["status"] = "0";
           payload["production_note_type"] = "0";
           payload["quantity"] = nonConfirmingPartsQuant;
-          payload["part_number"] = nonConfirmingPartsTypeCode; // ID do PN selecionado
+          payload["part_number"] = nonConfirmingPartsTypeCode;
 
           result = sendApiRequest(payload, "api/");
           handleSimpleApiResult(result, true);
@@ -1441,10 +1322,8 @@ void loop() {
       //////// INPUTS da tecla B ///////
       //////////////////////////////////
 
-      // Primeiro passo: selecionar o Part Number
       else if (deletePartsTypeInputMode) {
         
-        // Montar string com lista de PNs disponíveis
         String pnList = "Select PN and\npress B:\n-----\n";
         
         for (int i = 0; i < PART_NUMBERS_COUNT; i++) {
@@ -1453,7 +1332,6 @@ void loop() {
         
         drawCenteredText(pnList.c_str(), 1);
         
-        // Verificar se apertou um número de 1 a 9
         if (key >= '1' && key <= '9') {
           int selectedIndex = (key - '0') - 1;
           
@@ -1463,13 +1341,11 @@ void loop() {
             Serial.print("PN selecionado para deletar: ");
             Serial.println(PART_NUMBERS[selectedIndex].name);
             
-            // Avançar para próximo passo
             deletePartsTypeInputMode = false;
             deletePartsQuantInputMode = true;
             previousDebounceMillis = currentMillis;
           }
         }
-        // Botão 0 seleciona o 10º PN (se existir)
         else if (key == '0') {
           int selectedIndex = 9;
           
@@ -1486,10 +1362,8 @@ void loop() {
         }
       }
       
-      // Segundo passo: digitar quantidade
       else if (deletePartsQuantInputMode) {
         
-        // Mostrar qual PN foi selecionado
         String selectedPNName = "";
         for (int i = 0; i < PART_NUMBERS_COUNT; i++) {
           if (String(PART_NUMBERS[i].id) == deletePartsTypeCode) {
@@ -1510,10 +1384,9 @@ void loop() {
           StaticJsonDocument<1024> payload;
           ApiResult result;
 
-          // Deletar peças do PN selecionado
           payload["method_key"] = "delete_data";
           payload["quantity"] = deletePartsQuant;
-          payload["part_number"] = deletePartsTypeCode; // ID do PN selecionado
+          payload["part_number"] = deletePartsTypeCode;
 
           result = sendApiRequest(payload, "api/");
           handleSimpleApiResult(result, true);
@@ -1541,10 +1414,8 @@ void loop() {
           StaticJsonDocument<1024> payload;
           ApiResult result;
 
-          // Verifica mudança de usuário
           payload["method_key"] = "change_user";
 
-          // Caso não for válido volta USER_CODE para vazio e salva
           result = sendApiRequest(payload, "setup_controller/");
           if (!handleSimpleApiResult(result, true)) {
             USER_CODE = ""; 
@@ -1555,7 +1426,7 @@ void loop() {
 
       //////////////////////////////////
       //////// INPUTS da tecla D ///////
-      /////////////////////////////////
+      //////////////////////////////////
 
       // Passo 1: Digitar código da operação
       if (operationInputMode){
@@ -1595,20 +1466,15 @@ void loop() {
 
           result = sendApiRequest(payload, "setup_controller/");
           
-          // Processar resposta
           if (result.httpCode >= 200 && result.httpCode < 300) {
             JsonObject obj = result.json.as<JsonObject>();
             
-            // Verificar se precisa pedir mais informações
             if (obj["get_more_info"] == 1) {
               
-              // Verificar se há múltiplos PNs
               if (PART_NUMBERS_COUNT > 1) {
-                // Iniciar modo de input de quantidade por PN
                 partsQuantityPerPNInputMode = true;
                 currentPNInputIndex = 0;
                 
-                // Limpar array de quantidades
                 for (int i = 0; i < MAX_PART_NUMBERS; i++) {
                   partsQuantityPerPN[i] = 0;
                 }
@@ -1617,19 +1483,16 @@ void loop() {
                 Serial.println("Iniciando input de quantidades por PN...");
               } 
               else if (PART_NUMBERS_COUNT == 1) {
-                // Se só há 1 PN, usar o modo antigo
                 partsToProdInputMode = true;
                 inputMode = true;
               }
               else {
-                // Sem PNs, sair do modo input
                 inputMode = false;
                 drawCenteredText("No PNs available!", 1);
                 previousMessageMillis = currentMillis;
               }
               
             } else {
-              // Ordem já existe, não precisa pedir quantidades
               inputMode = false;
             }
             
@@ -1637,7 +1500,6 @@ void loop() {
             Serial.println(obj["message"].as<const char*>());
             
           } else {
-            // Erro na requisição
             OPERATION = "";
             PRODUCTION_ORDER = "";
             inputMode = false;
@@ -1653,12 +1515,11 @@ void loop() {
         }
       }
 
-      // Passo 3a: Input de quantidade para cada PN (novo fluxo)
+      // Passo 3a: Input de quantidade para cada PN (múltiplos PNs)
       else if (partsQuantityPerPNInputMode) {
         
         if (currentPNInputIndex < PART_NUMBERS_COUNT) {
           
-          // Mostrar qual PN está sendo configurado
           PartNumberData* currentPN = &PART_NUMBERS[currentPNInputIndex];
           
           String displayText = "PN " + String(currentPNInputIndex + 1) + "/" + String(PART_NUMBERS_COUNT) + ":\n";
@@ -1669,7 +1530,6 @@ void loop() {
           drawCenteredText(displayText.c_str(), 1);
           
           if (isdigit(key)) {
-            // Adicionar dígito à quantidade do PN atual
             partsQuantityPerPN[currentPNInputIndex] = 
               partsQuantityPerPN[currentPNInputIndex] * 10 + (key - '0');
             
@@ -1679,23 +1539,19 @@ void loop() {
             Serial.println(partsQuantityPerPN[currentPNInputIndex]);
           }
           else if (key == 'D') {
-            // Avançar para próximo PN
             currentPNInputIndex++;
             previousDebounceMillis = currentMillis;
             
-            // Se terminou todos os PNs, enviar para o servidor
             if (currentPNInputIndex >= PART_NUMBERS_COUNT) {
               partsQuantityPerPNInputMode = false;
               inputMode = false;
               
-              // Montar payload com quantidades de todos os PNs
               StaticJsonDocument<1024> payload;
               ApiResult result;
 
               payload["method_key"] = "change_operation";
               payload["final_step"] = 1;
               
-              // Criar objeto JSON com quantidades de cada PN
               JsonObject pnQuantities = payload.createNestedObject("part_numbers_quantities");
               
               for (int i = 0; i < PART_NUMBERS_COUNT; i++) {
@@ -1713,11 +1569,10 @@ void loop() {
               handleChangeOperation(result);
             }
           }
-          
         }
       }
 
-      // Passo 3b: Input de quantidade única (fluxo antigo - só para 1 PN)
+      // Passo 3b: Input de quantidade única (somente 1 PN)
       else if (partsToProdInputMode) {
         drawCenteredText(
                   ("Type parts quantity to \n"
@@ -1739,7 +1594,6 @@ void loop() {
           payload["method_key"] = "change_operation";
           payload["final_step"] = 1;
           
-          // Para um único PN, criar o mesmo formato
           JsonObject pnQuantities = payload.createNestedObject("part_numbers_quantities");
           String pnId = String(PART_NUMBERS[0].id);
           pnQuantities[pnId] = partsQuantityPerPN[0];
@@ -1765,7 +1619,6 @@ void loop() {
           StaticJsonDocument<1024> payload;
           ApiResult result;
 
-          // Verifica mudança de usuário
           payload["method_key"] = "start_intervention";
           payload["identification_number"] = interventionCode;
           
@@ -1774,7 +1627,6 @@ void loop() {
           if (handleSimpleApiResult(result, true)) {
             currentWorkStationState = INTERVENTION;
 
-            // Apaga LED azul e acende LED vermelho
             digitalWrite(DEBUG_LED, LOW);
             digitalWrite(INTERVENTION_LED, HIGH); 
           }
@@ -1782,7 +1634,6 @@ void loop() {
           previousPartMillis = currentMillis;
           interventionCode = "";
         }
-
       }
 
       // Não deixa chegar nas teclas caso tenha algum input ativo
@@ -1794,18 +1645,11 @@ void loop() {
     ///////////////////////////////////// KEYPAD ////////////////////////////////////////////////
     /////////////////////////////////////////////////////////////////////////////////////////////
 
-    // Caso não esteja com nenhum input ativado, irá aceitar novamente essas opções
-    // 🔹 SELEÇÃO DE PART NUMBER (Botões 1-9 e 0)
-    // Permite trocar entre Part Numbers usando os botões numéricos
     if (key >= '0' && key <= '9' && currentMillis - previousDebounceMillis >= debounce_keypad) {
       
-      // Converter char para número (0-9)
-      int keyNumber = key - '0';  // '1' - '0' = 1, '2' - '0' = 2, etc.
-      
-      // Ajustar para índice do array (botão 1 = índice 0, botão 2 = índice 1, etc.)
+      int keyNumber = key - '0';
       int targetIndex = (keyNumber == 0) ? 9 : keyNumber - 1;
       
-      // Verificar se o índice está dentro do range válido
       if (targetIndex < PART_NUMBERS_COUNT) {
         CURRENT_PN_INDEX = targetIndex;
         
@@ -1817,7 +1661,6 @@ void loop() {
           Serial.print(CURRENT_PN_INDEX);
           Serial.println(")");
           
-          // Mostrar no display qual PN foi selecionado
           String message = "PN " + String(CURRENT_PN_INDEX + 1) + "/" + String(PART_NUMBERS_COUNT) + ":\n" + selectedPN->name;
           drawCenteredText(message.c_str(), 1);
           previousMessageMillis = currentMillis;
@@ -1838,11 +1681,9 @@ void loop() {
 
     // Tecla A - Peças não conformes
     else if (key == 'A' && currentMillis - previousDebounceMillis >= debounce_keypad) {
+      resetAllInputModes(); // FIX 2: garante estado limpo antes de abrir novo fluxo
       inputMode = true;
-      nonConfirmingPartsTypeInputMode = true;  // Ativa seleção de PN primeiro
-      nonConfirmingPartsQuantInputMode = false;
-      nonConfirmingPartsTypeCode = "";
-      nonConfirmingPartsQuant = "";
+      nonConfirmingPartsTypeInputMode = true;
 
       previousInputMillis = currentMillis;
       previousDebounceMillis = currentMillis;
@@ -1850,17 +1691,17 @@ void loop() {
 
     // Tecla B - Deletar peças
     else if (key == 'B' && currentMillis - previousDebounceMillis >= debounce_keypad) {
+      resetAllInputModes(); // FIX 2: garante estado limpo antes de abrir novo fluxo
       inputMode = true;
-      deletePartsTypeInputMode = true;  // Ativa seleção de PN primeiro
-      deletePartsQuantInputMode = false;
-      deletePartsTypeCode = "";
-      deletePartsQuant = "";
+      deletePartsTypeInputMode = true;
 
       previousInputMillis = currentMillis;
       previousDebounceMillis = currentMillis;
     }
     
+    // Tecla C - Trocar operador
     else if (key == 'C' && currentMillis - previousDebounceMillis >= debounce_keypad) {
+      resetAllInputModes(); // FIX 2: garante estado limpo antes de abrir novo fluxo
       inputMode = true;
       operatorInputMode = true;
       USER_CODE = "";
@@ -1869,28 +1710,23 @@ void loop() {
       previousDebounceMillis = currentMillis;
     }
 
+    // Tecla D - Setup de operação / ordem de produção
     else if (key == 'D' && currentMillis - previousDebounceMillis >= debounce_keypad) {
+      resetAllInputModes(); // FIX 2: garante estado limpo antes de abrir novo fluxo
       inputMode = true;
       operationInputMode = true;
-
       OPERATION = "";
       PRODUCTION_ORDER = "";
 
-      // Limpar quantidades
-      for (int i = 0; i < MAX_PART_NUMBERS; i++) {
-        partsQuantityPerPN[i] = 0;
-      }
-      currentPNInputIndex = 0;
-      
       previousInputMillis = currentMillis;
       previousDebounceMillis = currentMillis;
     }
     
+    // Tecla # - Abertura de Intervenção
     else if (key == '#' && currentMillis - previousDebounceMillis >= debounce_keypad) {
+      resetAllInputModes(); // FIX 2: garante estado limpo antes de abrir novo fluxo
       inputMode = true;
       interventionInputMode = true;
-
-      interventionCode = "";
       
       previousInputMillis = currentMillis;
       previousDebounceMillis = currentMillis;
@@ -1898,25 +1734,19 @@ void loop() {
 
     // =====================================================
     // DETECÇÃO DO PRIMEIRO TOQUE no botão *
-    // Só entra aqui quando o * é pressionado pela primeira
-    // vez e o debounce já passou
     // =====================================================
     else if (key == '*' && currentMillis - previousDebounceMillis >= debounce_keypad) {
-        starKeyPressedMillis = currentMillis; // Anota o momento exato que o * foi pressionado
-        previousDebounceMillis = currentMillis; // Reseta o debounce
+        starKeyPressedMillis = currentMillis;
+        previousDebounceMillis = currentMillis;
     }
 
     // =====================================================
     // MONITORAMENTO DO BOTÃO * ENQUANTO ESTIVER SEGURADO
-    // Esse bloco roda a cada ciclo do loop enquanto o *
-    // tiver sido pressionado e ainda não foi resolvido
-    // (starKeyPressedMillis > 0 significa "aguardando resolução")
     // =====================================================
     if (starKeyPressedMillis > 0) {
 
-        // Verifica se o * ainda está fisicamente pressionado neste exato momento
         bool starHeld = false;
-        keypad.getKeys(); // Atualiza o estado interno de todas as teclas
+        keypad.getKeys();
         for (int i = 0; i < LIST_MAX; i++) {
             if (keypad.key[i].kchar == '*' &&
                 (keypad.key[i].kstate == PRESSED || keypad.key[i].kstate == HOLD)) {
@@ -1926,10 +1756,6 @@ void loop() {
         }
 
         if (!starHeld) {
-            // -----------------------------------------------
-            // BOTÃO FOI SOLTO antes de completar 3 segundos
-            // → comportamento normal: vai para STANDBY
-            // -----------------------------------------------
             if (currentMillis - starKeyPressedMillis < starKeyResetInterval) {
                 currentWorkStationState = STANDBY;
                 digitalWrite(DEBUG_LED, false);
@@ -1937,23 +1763,15 @@ void loop() {
                 Serial.println("Standby Mode");
                 drawCenteredText("Standby Mode", 1);
             }
-            starKeyPressedMillis = 0; // Zera para parar de monitorar
+            starKeyPressedMillis = 0;
         }
         else if (currentMillis - starKeyPressedMillis >= starKeyResetInterval) {
-            // -----------------------------------------------
-            // BOTÃO AINDA SEGURADO e já passou 3 segundos
-            // → reinicia o ESP32
-            // -----------------------------------------------
             Serial.println("Reiniciando ESP32...");
             drawCenteredText("Restarting...", 1);
             delay(1000);
             ESP.restart();
         }
         else {
-            // -----------------------------------------------
-            // BOTÃO AINDA SEGURADO mas ainda não chegou em 3s
-            // → mostra contagem regressiva no display
-            // -----------------------------------------------
             int segundosRestantes = (starKeyResetInterval / 1000) - ((currentMillis - starKeyPressedMillis) / 1000);
             drawCenteredText(("Hold to restart\n" + String(segundosRestantes) + "s...").c_str(), 1);
         }

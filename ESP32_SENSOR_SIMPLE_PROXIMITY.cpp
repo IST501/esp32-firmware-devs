@@ -149,7 +149,7 @@ WorkStationState currentWorkStationState = RUNNING;
 
 const unsigned long read_interval = 10; // Intervalo de tempo de 10 milissegundos para cada leitura
 const unsigned long debounce_keypad = 1000; // Intervalo de 1 seg de debounce para os botões no teclado
-const unsigned long message_interval = 3000; // Intervalo de 2 seg de exibição da mensagem no display após intereção do usuário
+const unsigned long message_interval = 3000; // Intervalo de 3 seg de exibição da mensagem no display após intereção do usuário
 
 const unsigned long starKeyResetInterval = 3000; // Intervalo de tempo colocado para caso o botão * fique segurado por mais de 3 segundos ele reinicia
 unsigned long starKeyPressedMillis = 0; // Variável que armazena o momento em que o botão foi * foi apertado
@@ -819,7 +819,6 @@ void loop() {
       return;
   }
 
-  // MARK: PAREI AQUI
   // Caso fique mais de 30 segundos no modo input ele sai e zera o parâmetro que estava sendo digitado
   if (currentMillis - previousInputMillis > inputModeInterval){
 
