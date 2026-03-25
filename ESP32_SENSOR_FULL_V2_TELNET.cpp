@@ -59,6 +59,87 @@ String SERVER_PORT = "8000";
 String SENSOR_INTERVAL = "1000"; // Intervalo com padrão de 1 seg para cada leitura do sensor de ciclo
 String DISPLAY_TYPE = "oled_096"; // Display 0.96 polegadas como default
 String SENSOR_READ_TYPE = "pulse_signal"; // Tipo de leitura: pulse_signal | pulse_signal_linked | continuos_signal
+String ENABLE_TELNET = "0"; // Flag para habilitar o servidor Telnet
+
+WiFiServer telnetServer(23);
+WiFiClient telnetClient;
+
+template <typename T>
+void sysPrint(T msg) {
+  Serial .print(msg);
+  if (ENABLE_TELNET == "1" && telnetClient && telnetClient.connected()) {
+    telnetClient.print(msg);
+  }
+}
+
+template <typename T>
+void sysPrintln(T msg) {
+  Serial .println(msg);
+  if (ENABLE_TELNET == "1" && telnetClient && telnetClient.connected()) {
+    telnetClient.println(msg);
+  }
+}
+
+void sysPrintln() {
+  Serial .println();
+  if (ENABLE_TELNET == "1" && telnetClient && telnetClient.connected()) {
+    telnetClient.println();
+  }
+}
+
+void sysPrintf(const char *format, ...) {
+  char loc_buf[256];
+  char * temp = loc_buf;
+  va_list arg;
+  va_list copy;
+  va_start(arg, format);
+  va_copy(copy, arg);
+  int len = vsnprintf(temp, sizeof(loc_buf), format, copy);
+  va_end(copy);
+  if(len < 0) {
+    va_end(arg);
+    return;
+  };
+  if(len >= sizeof(loc_buf)){
+    temp = (char*)malloc(len+1);
+    if(temp == NULL) {
+      va_end(arg);
+      return;
+    }
+    vsnprintf(temp, len+1, format, arg);
+  }
+  va_end(arg);
+  
+  Serial .print(temp);
+  if (ENABLE_TELNET == "1" && telnetClient && telnetClient.connected()) {
+    String tStr = String(temp);
+    tStr.replace("\r\n", "\n"); // Normalize in case it already has \r\n
+    tStr.replace("\n", "\r\n"); // Force \r\n
+    telnetClient.print(tStr);
+  }
+  if(temp != loc_buf){
+    free(temp);
+  }
+}
+
+void telnetLog(String msg) {
+  sysPrintln(msg);
+}
+
+void handleTelnet() {
+  if (ENABLE_TELNET != "1") return;
+  
+  if (telnetServer.hasClient()) {
+    if (!telnetClient || !telnetClient.connected()) {
+      if (telnetClient) telnetClient.stop();
+      telnetClient = telnetServer.available();
+      telnetClient.println("=== Production Hub Telnet Connected ===");
+    } else {
+      WiFiClient newClient = telnetServer.available();
+      newClient.stop(); // Rejeita múltiplas conexões
+    }
+  }
+}
 
 int step = 0;
 bool lastSignalState = false; // Usada pelo modo continuos_signal
@@ -243,17 +324,20 @@ void saveConfig(String param, String value) {
     else if (param == "SENSOR_READ_TYPE") {
       SENSOR_READ_TYPE = value;
     }
+    else if (param == "ENABLE_TELNET") {
+      ENABLE_TELNET = value;
+    }
     else if (param == "USER_CODE") {
       USER_CODE = value;
     }
     else {
-      Serial.println("Parâmetro inválido!");
+      sysPrintln("Parâmetro inválido!");
       return;
     }
   
     File file = SPIFFS.open(filename, FILE_WRITE);
     if (!file) {
-      Serial.println("Erro ao abrir o arquivo para escrita!");
+      sysPrintln("Erro ao abrir o arquivo para escrita!");
       return;
     }
   
@@ -265,10 +349,11 @@ void saveConfig(String param, String value) {
     file.println("SENSOR_INTERVAL=" + SENSOR_INTERVAL);
     file.println("DISPLAY_TYPE=" + DISPLAY_TYPE);
     file.println("SENSOR_READ_TYPE=" + SENSOR_READ_TYPE);
+    file.println("ENABLE_TELNET=" + ENABLE_TELNET);
     
     file.close();
   
-    Serial.println("Parâmetro " + param + " atualizado com sucesso!");
+    sysPrintln("Parâmetro " + param + " atualizado com sucesso!");
 }
 
 
@@ -276,7 +361,7 @@ void saveConfig(String param, String value) {
 void loadConfig() {
     File file = SPIFFS.open(filename, FILE_READ);
     if (!file) {
-      Serial.println("Arquivo de configuração não encontrado! Criando um novo...");
+      sysPrintln("Arquivo de configuração não encontrado! Criando um novo...");
       
       saveConfig("WORK_STATION", WORK_STATION);
       saveConfig("SSID_NAME", SSID_NAME);
@@ -318,19 +403,23 @@ void loadConfig() {
       else if (line.startsWith("SENSOR_READ_TYPE=")) {
         SENSOR_READ_TYPE = line.substring(17);
       }
+      else if (line.startsWith("ENABLE_TELNET=")) {
+        ENABLE_TELNET = line.substring(14);
+      }
     }
     
     file.close();
   
-    Serial.println("Configurações carregadas da SPIFFS:");
-    Serial.println("WORK_STATION: " + WORK_STATION);
-    Serial.println("SSID_NAME: " + SSID_NAME);
-    Serial.println("PASSWORD: " + PASSWORD);
-    Serial.println("SERVER_IP: " + SERVER_IP);
-    Serial.println("SERVER_PORT: " + SERVER_PORT);
-    Serial.println("SENSOR_INTERVAL: " + SENSOR_INTERVAL);
-    Serial.println("DISPLAY_TYPE: " + DISPLAY_TYPE);
-    Serial.println("SENSOR_READ_TYPE: " + SENSOR_READ_TYPE);
+    sysPrintln("Configurações carregadas da SPIFFS:");
+    sysPrintln("WORK_STATION: " + WORK_STATION);
+    sysPrintln("SSID_NAME: " + SSID_NAME);
+    sysPrintln("PASSWORD: " + PASSWORD);
+    sysPrintln("SERVER_IP: " + SERVER_IP);
+    sysPrintln("SERVER_PORT: " + SERVER_PORT);
+    sysPrintln("SENSOR_INTERVAL: " + SENSOR_INTERVAL);
+    sysPrintln("DISPLAY_TYPE: " + DISPLAY_TYPE);
+    sysPrintln("SENSOR_READ_TYPE: " + SENSOR_READ_TYPE);
+    sysPrintln("ENABLE_TELNET: " + ENABLE_TELNET);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -352,7 +441,7 @@ void clearPartNumbers() {
 // Função para adicionar um part number ao array
 bool addPartNumber(int id, String name, int parts_to_produce, int good_parts, int bad_parts) {
     if (PART_NUMBERS_COUNT >= MAX_PART_NUMBERS) {
-        Serial.println("Limite de Part Numbers atingido!");
+        sysPrintln("Limite de Part Numbers atingido!");
         return false;
     }
     
@@ -427,7 +516,10 @@ String generateConfigPage() {
           <label>SSID:</label><br>
           <input type="text" name="ssid" value=")rawliteral" + SSID_NAME + R"rawliteral("><br><br>
           <label>Password:</label><br>
-          <input type="password" name="password" value=")rawliteral" + PASSWORD + R"rawliteral("><br><br>
+          <input type="password" id="pwd" name="password" value=")rawliteral" + PASSWORD + R"rawliteral("><br>
+          <label style="font-size: 12px; font-weight: normal; margin: 0; display: inline-block; cursor: pointer;">
+              <input type="checkbox" style="width: auto; margin-right: 5px;" onclick="document.getElementById('pwd').type = this.checked ? 'text' : 'password'"> Show Password
+          </label><br><br>
   
       <h2>Production Hub Settings</h2>
           <label>Work Station Name:</label><br>
@@ -446,6 +538,12 @@ String generateConfigPage() {
 
           <label>Sensor Interval (s):</label><br>
           <input type="number" name="sensor-interval" min="0.5" step="0.5" value=")rawliteral" + String(SENSOR_INTERVAL.toFloat()/1000.0, 1) + R"rawliteral("><br><br>
+
+          <label>Telnet Support:</label><br>
+          <select name="enable_telnet">
+            <option value="0" )rawliteral" + (ENABLE_TELNET == "0" ? "selected" : "") + R"rawliteral(>Disabled</option>
+            <option value="1" )rawliteral" + (ENABLE_TELNET == "1" ? "selected" : "") + R"rawliteral(>Enabled</option>
+          </select><br><br>
 
           <button type="submit">Save and Restart</button>
       </form>
@@ -470,6 +568,7 @@ void handleSave() {
   String newSensorInterval = String(server.arg("sensor-interval").toFloat() * 1000);
   String newDisplayType = server.arg("display");
   String newSensorReadType = server.arg("sensor_read_type");
+  String newEnableTelnet = server.arg("enable_telnet");
 
   if (newSSID.length() > 0 && newPass.length() > 0 && newWorkStation.length() > 0 && newServerIp.length() > 0 && newServerPort.length() > 0) {
             
@@ -483,6 +582,7 @@ void handleSave() {
           saveConfig("DISPLAY_TYPE", newDisplayType);
       }
       saveConfig("SENSOR_READ_TYPE", newSensorReadType);
+      saveConfig("ENABLE_TELNET", newEnableTelnet);
 
       server.send(200, "text/html", "<h2>Configuration saved! Restarting...</h2>");
       delay(2000);
@@ -501,13 +601,13 @@ void initDisplay() {
     display = new Adafruit_SSD1306(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
     if (!display->begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-        Serial.println("Falha ao inicializar o display OLED");
+        sysPrintln("Falha ao inicializar o display OLED");
         while (1);
     }
 
     display->clearDisplay();
     display->display();
-    Serial.println("Display iniciado: " + String(SCREEN_WIDTH) + "x" + String(SCREEN_HEIGHT));
+    sysPrintln("Display iniciado: " + String(SCREEN_WIDTH) + "x" + String(SCREEN_HEIGHT));
 }
 
 void drawCenteredText(const char* text, uint8_t textSize) {
@@ -653,7 +753,7 @@ ApiResult sendApiRequest(JsonDocument& payload, const String& route) {
 bool handleSimpleApiResult(ApiResult& result, bool showSuccessMessage = true, bool successfulBlink = true) {
 
     if (result.httpCode < 0) {
-      Serial.println("network-error");
+      sysPrintln("network-error");
       return false;
     }
 
@@ -663,10 +763,10 @@ bool handleSimpleApiResult(ApiResult& result, bool showSuccessMessage = true, bo
     if (msg) {
 
         if (result.httpCode < 200 || result.httpCode >= 300) {
-            Serial.print("HTTP error: ");
-            Serial.println(result.httpCode);
+            sysPrint("HTTP error: ");
+            sysPrintln(result.httpCode);
 
-            Serial.println(msg);
+            sysPrintln(msg);
             drawCenteredText(msg, 1);
             previousMessageMillis = millis();
             return false;
@@ -681,14 +781,14 @@ bool handleSimpleApiResult(ApiResult& result, bool showSuccessMessage = true, bo
               successfulResponse();
             }
                            
-            Serial.print("Response JSON: ");
+            sysPrint("Response JSON: ");
             serializeJsonPretty(obj, Serial);
-            Serial.println();
+            sysPrintln();
             return true;
         }
     }
     else{
-        Serial.println("There is not response.");
+        sysPrintln("There is not response.");
         drawCenteredText("There is not response.", 1);
         previousMessageMillis = millis();
         return false;
@@ -707,8 +807,8 @@ void handleChangeOperation(ApiResult& result) {
         workOrderInputMode = false;
         partsToProdInputMode = false;
 
-        Serial.println(result.httpCode);
-        Serial.println("NETWORK ERROR!");
+        sysPrintln(result.httpCode);
+        sysPrintln("NETWORK ERROR!");
         drawCenteredText("NETWORK ERROR!", 1);
         previousMessageMillis = millis();
         return;
@@ -718,7 +818,7 @@ void handleChangeOperation(ApiResult& result) {
     const char* msg = obj["message"];
 
     if (!msg) {
-        Serial.println("No message in response");
+        sysPrintln("No message in response");
         return;
     }
 
@@ -732,14 +832,14 @@ void handleChangeOperation(ApiResult& result) {
         workOrderInputMode = false;
         partsToProdInputMode = false;
 
-        Serial.println(result.httpCode);
-        Serial.println(msg);
+        sysPrintln(result.httpCode);
+        sysPrintln(msg);
         drawCenteredText(msg, 1);
         previousMessageMillis = millis();
         return;
     }
 
-    Serial.println("HANDLE CHANGE OPERATION OK");
+    sysPrintln("HANDLE CHANGE OPERATION OK");
 
     if (PRODUCTION_ORDER == "") {
 
@@ -768,8 +868,8 @@ void handleChangeOperation(ApiResult& result) {
     saveConfig("OPERATION", OPERATION);
     saveConfig("PRODUCTION_ORDER", PRODUCTION_ORDER);
 
-    Serial.println(result.httpCode);
-    Serial.println(msg);
+    sysPrintln(result.httpCode);
+    sysPrintln(msg);
     drawCenteredText(msg, 1);
     previousMessageMillis = millis();
 }
@@ -778,8 +878,8 @@ void handlestopIntervention(ApiResult& result) {
 
     if (result.httpCode < 0) {
 
-        Serial.println(result.httpCode);
-        Serial.println("NETWORK ERROR!");
+        sysPrintln(result.httpCode);
+        sysPrintln("NETWORK ERROR!");
         drawCenteredText("NETWORK ERROR!", 1);
         
         return;
@@ -790,7 +890,7 @@ void handlestopIntervention(ApiResult& result) {
 
     if (!msg) {
 
-        Serial.println("No message in response");
+        sysPrintln("No message in response");
         drawCenteredText("No message in response", 1);
 
         return;
@@ -798,8 +898,8 @@ void handlestopIntervention(ApiResult& result) {
 
     if (result.httpCode < 200 || result.httpCode >= 300) {
 
-        Serial.println(result.httpCode);
-        Serial.println(msg);
+        sysPrintln(result.httpCode);
+        sysPrintln(msg);
         drawCenteredText(msg, 1);
     }
     else {
@@ -808,8 +908,8 @@ void handlestopIntervention(ApiResult& result) {
         digitalWrite(DEBUG_LED, HIGH);
         digitalWrite(INTERVENTION_LED, LOW);
 
-        Serial.println(result.httpCode);
-        Serial.println(msg);
+        sysPrintln(result.httpCode);
+        sysPrintln(msg);
         drawCenteredText(msg, 1);
     }
 }
@@ -822,7 +922,7 @@ void handleSyncWorkStation(ApiResult& result) {
     if (result.httpCode < 0) {
         validateConfigs = false;
         drawCenteredText("SERVER \n NOT FOUND!", 1);
-        Serial.println("SERVER NOT FOUND!");
+        sysPrintln("SERVER NOT FOUND!");
         return;
     }
 
@@ -832,25 +932,25 @@ void handleSyncWorkStation(ApiResult& result) {
     if (!msg) {
         validateConfigs = false;
         drawCenteredText("Invalid response", 1);
-        Serial.println("Invalid response from server!");
+        sysPrintln("Invalid response from server!");
         return;
     }
 
     if (result.httpCode < 200 || result.httpCode >= 300) {
         validateConfigs = false;
         drawCenteredText(msg, 1);
-        Serial.println("HTTP error: " + String(result.httpCode));
+        sysPrintln("HTTP error: " + String(result.httpCode));
         return;
     }
 
     validateConfigs = true;
-    Serial.println(msg);
+    sysPrintln(msg);
 
     // Exibe mensagem de sincronização na primeira vez que conecta com sucesso,
     // mas NÃO retorna — continua para popular os dados normalmente.
     if (!previousValidateState) {
         drawCenteredText(msg, 1);
-        Serial.println("Workstation synchronized successfully!");
+        sysPrintln("Workstation synchronized successfully!");
     }
 
     if (!obj["intervention_data"].isNull()) {
@@ -860,7 +960,7 @@ void handleSyncWorkStation(ApiResult& result) {
         digitalWrite(INTERVENTION_LED, HIGH);
 
         drawCenteredText(msg, 1);
-        Serial.println("Workstation in intervention state!");
+        sysPrintln("Workstation in intervention state!");
         return;
     }
     else if (currentWorkStationState != RUNNING) {
@@ -870,7 +970,7 @@ void handleSyncWorkStation(ApiResult& result) {
         digitalWrite(INTERVENTION_LED, LOW);
         
         drawCenteredText("Intervention closed remotely", 1);
-        Serial.println("Intervention closed remotely");
+        sysPrintln("Intervention closed remotely");
     }
 
     clearPartNumbers();
@@ -887,7 +987,7 @@ void handleSyncWorkStation(ApiResult& result) {
         ? ""
         : String(obj["operation_data"]["id"].as<int>());
 
-    //Serial.println("zibs");
+    // sysPrintln("zibs");
 
     JsonObject opPNs = obj["operation_data"]["part_numbers"].as<JsonObject>();
 
@@ -937,7 +1037,7 @@ void handleSyncWorkStation(ApiResult& result) {
     }
 
     for (int i = 0; i < PART_NUMBERS_COUNT; i++) {
-        Serial.printf(
+        sysPrintf(
             "PN %d | %s | ToProd:%d | OK:%d | NOK:%d \n",
             PART_NUMBERS[i].id,
             PART_NUMBERS[i].name.c_str(),
@@ -953,17 +1053,17 @@ void sync_workstation(){
   DynamicJsonDocument payload(256);
 
   ApiResult result = sendApiRequest(payload, "sync_workstation/");
-  Serial.println("SYNC WORKSTATION RESULT: " + String(result.httpCode));
+  sysPrintln("SYNC WORKSTATION RESULT: " + String(result.httpCode));
 
   /* // Log temporário para debug do zeramento
   String rawSync;
   serializeJson(result.json, rawSync);
-  Serial.println("SYNC RAW: " + rawSync); */
+  sysPrintln("SYNC RAW: " + rawSync); */
 
   // Guarda se o JSON foi parseado com sucesso antes de processar.
   // Evita zerar variáveis locais quando a deserialização falha silenciosamente.
   if (result.httpCode > 0 && !result.hasJson) {
-    Serial.println("SYNC: JSON parse failed, skipping to avoid clearing local state.");
+    sysPrintln("SYNC: JSON parse failed, skipping to avoid clearing local state.");
     return;
   }
 
@@ -978,7 +1078,7 @@ void setup() {
   esp_task_wdt_add(NULL);
 
   if (!SPIFFS.begin(true)) {
-    Serial.println("Erro ao montar SPIFFS!");
+    sysPrintln("Erro ao montar SPIFFS!");
     return;
   }
 
@@ -993,7 +1093,7 @@ void setup() {
   bool ledState = false;
 
   WiFi.begin(SSID_NAME.c_str(), PASSWORD.c_str());
-  Serial.println("Connecting to WiFi...");
+  sysPrintln("Connecting to WiFi...");
   drawCenteredText("Connecting to WiFi...", 1);
 
   unsigned long startAttemptTime = millis();
@@ -1001,7 +1101,24 @@ void setup() {
     ledState = !ledState;
     digitalWrite(DEBUG_LED, ledState);
     delay(1000);
-    Serial.print(".");
+    sysPrint(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    sysPrintln("\nConectado à rede WiFi!");
+    sysPrint("Endereço IP Local: ");
+    sysPrintln(WiFi.localIP());
+    
+    if (ENABLE_TELNET == "1") {
+      sysPrintln("--------------------------------------------------");
+      sysPrintln("Servidor Telnet ATIVO.");
+      sysPrintln("Para visualizar os logs via Wi-Fi, abra o CMD ou PowerShell do Windows e digite:");
+      sysPrint("telnet ");
+      sysPrintln(WiFi.localIP());
+      sysPrintln("--------------------------------------------------");
+    }
+  } else {
+    sysPrintln("\nFalha ao conectar na rede WiFi. Iniciando AP...");
   }
 
   uint8_t mac[6];
@@ -1010,13 +1127,18 @@ void setup() {
   sprintf(apSSID, "ESP32_%02X%02X%02X", mac[3], mac[4], mac[5]);
 
   WiFi.softAP(apSSID, apPassword);
-  Serial.println("Hotspot ativo!");
-  Serial.print("Endereço IP do AP: ");
-  Serial.println(WiFi.softAPIP());
+  sysPrintln("Hotspot ativo!");
+  sysPrint("Endereço IP do AP: ");
+  sysPrintln(WiFi.softAPIP());
 
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSave);
   server.begin();
+  
+  if (ENABLE_TELNET == "1") {
+    telnetServer.begin();
+    sysPrintln("Telnet server started on port 23");
+  }
   
   sync_workstation();
 
@@ -1033,7 +1155,8 @@ void setup() {
 void loop() {
 
   server.handleClient();
-	esp_task_wdt_reset();
+  handleTelnet();
+  esp_task_wdt_reset();
 
   unsigned long currentMillis = millis();
 	if (currentMillis - previousReadMillis < read_interval) {
@@ -1058,7 +1181,7 @@ void loop() {
           digitalWrite(DEBUG_LED, HIGH);
           digitalWrite(INTERVENTION_LED, LOW);
           
-          Serial.println("Returning to Normal Mode");
+          sysPrintln("Returning to Normal Mode");
           drawCenteredText("Returning to\nNormal Mode", 1);
           previousMessageMillis = currentMillis;
       }
@@ -1079,7 +1202,7 @@ void loop() {
           lastWifiRetryMillis = currentMillis;
           previousMessageMillis = currentMillis;
 
-          Serial.println("Trying to reconnect WiFi...");
+          sysPrintln("Trying to reconnect WiFi...");
           drawCenteredText(("Trying to reconnect \n WiFi..."), 1);
           WiFi.disconnect();
           WiFi.begin(SSID_NAME.c_str(), PASSWORD.c_str());
@@ -1119,6 +1242,10 @@ void loop() {
   int sensorState2 = digitalRead(SENSOR_PIN_2);
   char key = keypad.getKey();
 
+  if (key && (key == 'A' || key == 'B' || key == 'C' || key == 'D')) {
+    telnetLog("Letter Key Pressed: " + String(key));
+  }
+
 
   if (currentWorkStationState == INTERVENTION) {
     if (key == '#') {
@@ -1145,7 +1272,7 @@ void loop() {
       // --- Pulse Signal (modo simples) ---
       if (SENSOR_READ_TYPE == "pulse_signal") {
 
-        Serial.println("Peça Conforme, modo simples!");
+        sysPrintln("Peça Conforme, modo simples!");
 
         StaticJsonDocument<1024> payload;
         payload["method_key"] = "insert_data";
@@ -1162,7 +1289,7 @@ void loop() {
       else if (SENSOR_READ_TYPE == "pulse_signal_linked") {
 
         if (step == 0) {
-          Serial.println("Peça passou pelo primeiro estágio do modo step!");
+          sysPrintln("Peça passou pelo primeiro estágio do modo step!");
 
           StaticJsonDocument<1024> payload;
           payload["method_key"] = "insert_data";
@@ -1177,7 +1304,7 @@ void loop() {
         }
 
         else if (step == 1) {
-          Serial.println("Última peça não conforme pelo modo step!");
+          sysPrintln("Última peça não conforme pelo modo step!");
 
           StaticJsonDocument<1024> payload;
           ApiResult result;
@@ -1190,7 +1317,7 @@ void loop() {
 
           payload.clear();
 
-          Serial.println("Peça passou pelo primeiro estágio do modo step!");
+          sysPrintln("Peça passou pelo primeiro estágio do modo step!");
           payload["method_key"] = "insert_data";
           payload["status"] = "1";
           payload["production_note_type"] = "1";
@@ -1205,7 +1332,7 @@ void loop() {
       // --- Continuos Signal ---
       else if (SENSOR_READ_TYPE == "continuos_signal") {
         if (lastSignalState == false) {
-          Serial.println("Peça Conforme, modo contínuo!");
+          sysPrintln("Peça Conforme, modo contínuo!");
 
           StaticJsonDocument<1024> payload;
           payload["method_key"] = "insert_data";
@@ -1231,15 +1358,15 @@ void loop() {
     if (sensorState2 == LOW && currentMillis - previousPartMillis >= SENSOR_INTERVAL.toInt()) {
       if (SENSOR_READ_TYPE == "pulse_signal_linked") {
         if (step == 1) {
-          Serial.println("Peça passou pela verificação do step!");
+          sysPrintln("Peça passou pela verificação do step!");
           step = 0;
         }
         else if (step == 0) {
-          Serial.println("Não passou pela primeira etapa!");
+          sysPrintln("Não passou pela primeira etapa!");
         }
       }
       else {
-        Serial.println("Sensor 2 ignorado: modo pulse_signal_linked desligado.");
+        sysPrintln("Sensor 2 ignorado: modo pulse_signal_linked desligado.");
       }
       previousPartMillis = currentMillis;
     }
@@ -1271,8 +1398,8 @@ void loop() {
           if (selectedIndex < PART_NUMBERS_COUNT) {
             nonConfirmingPartsTypeCode = String(PART_NUMBERS[selectedIndex].id);
             
-            Serial.print("PN selecionado para não conforme: ");
-            Serial.println(PART_NUMBERS[selectedIndex].name);
+            sysPrint("PN selecionado para não conforme: ");
+            sysPrintln(PART_NUMBERS[selectedIndex].name);
             
             nonConfirmingPartsTypeInputMode = false;
             nonConfirmingPartsQuantInputMode = true;
@@ -1338,8 +1465,8 @@ void loop() {
           if (selectedIndex < PART_NUMBERS_COUNT) {
             deletePartsTypeCode = String(PART_NUMBERS[selectedIndex].id);
             
-            Serial.print("PN selecionado para deletar: ");
-            Serial.println(PART_NUMBERS[selectedIndex].name);
+            sysPrint("PN selecionado para deletar: ");
+            sysPrintln(PART_NUMBERS[selectedIndex].name);
             
             deletePartsTypeInputMode = false;
             deletePartsQuantInputMode = true;
@@ -1438,7 +1565,7 @@ void loop() {
 
         if (isdigit(key)) {
           PRODUCTION_ORDER += key;
-          Serial.println(PRODUCTION_ORDER);
+          sysPrintln(PRODUCTION_ORDER);
         }
 
         else if (key == 'D'){
@@ -1471,7 +1598,7 @@ void loop() {
                 PART_NUMBERS[PART_NUMBERS_COUNT].bad_parts_produced  = 0;
                 PART_NUMBERS_COUNT++;
               }
-              Serial.println("PNs carregados da resposta: " + String(PART_NUMBERS_COUNT));
+              sysPrintln("PNs carregados da resposta: " + String(PART_NUMBERS_COUNT));
 
               if (PART_NUMBERS_COUNT > 1) {
                 partsQuantityPerPNInputMode = true;
@@ -1482,7 +1609,7 @@ void loop() {
                 }
                 
                 inputMode = true;
-                Serial.println("Iniciando input de quantidades por PN...");
+                sysPrintln("Iniciando input de quantidades por PN...");
               } 
               else if (PART_NUMBERS_COUNT == 1) {
                 partsToProdInputMode = true;
@@ -1498,8 +1625,8 @@ void loop() {
               inputMode = false;
             }
             
-            Serial.println(result.httpCode);
-            Serial.println(obj["message"].as<const char*>());
+            sysPrintln(result.httpCode);
+            sysPrintln(obj["message"].as<const char*>());
             
           } else {
             OPERATION = "";
@@ -1535,10 +1662,10 @@ void loop() {
             partsQuantityPerPN[currentPNInputIndex] = 
               partsQuantityPerPN[currentPNInputIndex] * 10 + (key - '0');
             
-            Serial.print("PN ");
-            Serial.print(currentPN->name);
-            Serial.print(" - Quantidade: ");
-            Serial.println(partsQuantityPerPN[currentPNInputIndex]);
+            sysPrint("PN ");
+            sysPrint(currentPN->name);
+            sysPrint(" - Quantidade: ");
+            sysPrintln(partsQuantityPerPN[currentPNInputIndex]);
           }
           else if (key == 'D') {
             currentPNInputIndex++;
@@ -1560,11 +1687,11 @@ void loop() {
                 String pnId = String(PART_NUMBERS[i].id);
                 pnQuantities[pnId] = partsQuantityPerPN[i];
                 
-                Serial.print("Enviando - PN ID ");
-                Serial.print(pnId);
-                Serial.print(": ");
-                Serial.print(partsQuantityPerPN[i]);
-                Serial.println(" peças");
+                sysPrint("Enviando - PN ID ");
+                sysPrint(pnId);
+                sysPrint(": ");
+                sysPrint(partsQuantityPerPN[i]);
+                sysPrintln(" peças");
               }
 
               result = sendApiRequest(payload, "setup_controller/");
@@ -1657,11 +1784,11 @@ void loop() {
         
         PartNumberData* selectedPN = getCurrentPartNumber();
         if (selectedPN != nullptr) {
-          Serial.print("Part Number selecionado: ");
-          Serial.print(selectedPN->name);
-          Serial.print(" (Index: ");
-          Serial.print(CURRENT_PN_INDEX);
-          Serial.println(")");
+          sysPrint("Part Number selecionado: ");
+          sysPrint(selectedPN->name);
+          sysPrint(" (Index: ");
+          sysPrint(CURRENT_PN_INDEX);
+          sysPrintln(")");
           
           String message = "PN " + String(CURRENT_PN_INDEX + 1) + "/" + String(PART_NUMBERS_COUNT) + ":\n" + selectedPN->name;
           drawCenteredText(message.c_str(), 1);
@@ -1669,9 +1796,9 @@ void loop() {
         }
       } 
       else {
-        Serial.print("Botão ");
-        Serial.print(keyNumber);
-        Serial.println(" - Nenhum PN disponível neste índice");
+        sysPrint("Botão ");
+        sysPrint(keyNumber);
+        sysPrintln(" - Nenhum PN disponível neste índice");
         
         String message = "PN " + String(keyNumber) + "\n não existe!";
         drawCenteredText(message.c_str(), 1);
@@ -1772,13 +1899,13 @@ void loop() {
                 currentWorkStationState = STANDBY;
                 digitalWrite(DEBUG_LED, false);
                 digitalWrite(INTERVENTION_LED, false);
-                Serial.println("Standby Mode");
+                sysPrintln("Standby Mode");
                 drawCenteredText("Standby Mode", 1);
             }
             starKeyPressedMillis = 0;
         }
         else if (currentMillis - starKeyPressedMillis >= starKeyResetInterval) {
-            Serial.println("Reiniciando ESP32...");
+            sysPrintln("Reiniciando ESP32...");
             drawCenteredText("Restarting...", 1);
             delay(1000);
             ESP.restart();
@@ -1812,7 +1939,7 @@ void loop() {
             // Segurado 3s+ → envia clear_setup para a API
             zeroKeyPressedMillis = 0;
 
-            Serial.println("Enviando clear_setup...");
+            sysPrintln("Enviando clear_setup...");
             drawCenteredText("Clearing\nsetup...", 1);
 
             StaticJsonDocument<1024> payload;
@@ -1826,7 +1953,7 @@ void loop() {
                 OPERATION = "";
                 PRODUCTION_ORDER = "";
                 clearPartNumbers();
-                Serial.println("Setup cleared!");
+                sysPrintln("Setup cleared!");
             }
 
             previousMessageMillis = currentMillis;
