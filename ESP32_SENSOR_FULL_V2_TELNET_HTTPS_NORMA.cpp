@@ -229,7 +229,7 @@ Keypad keypad = Keypad(makeKeymap(keys), pin_rows, pin_column, ROW_NUM, COLUMN_N
 #define DEBUG_LED 2           // Digital Output para o led de debug (azul)
 #define INTERVENTION_LED 15   // Digital Output para o led de intervenções (vermelho)
 #define SENSOR_PIN_1 4          // Digital Input para realizar as leituras de peça
-#define SENSOR_PIN_2 19        // Digital Input para realizar as leituras de peça
+#define SENSOR_PIN_2 19        // Digital Input para realizar as leituras de peças não conformes
 
 /*
 currentWorkStationState = -1 (quando aperta * para totalmente o funcionamento do sensor, voltando apenas quando apertar novamente o *)
@@ -546,7 +546,6 @@ String generateConfigPage() {
           <label>Sensor Read Type:</label><br>
           <select name="sensor_read_type">
             <option value="pulse_signal" )rawliteral" + (SENSOR_READ_TYPE == "pulse_signal" ? "selected" : "") + R"rawliteral(>Pulse Signal</option>
-            <option value="pulse_signal_linked" )rawliteral" + (SENSOR_READ_TYPE == "pulse_signal_linked" ? "selected" : "") + R"rawliteral(>Pulse Signal + Linked Steps</option>
             <option value="continuos_signal" )rawliteral" + (SENSOR_READ_TYPE == "continuos_signal" ? "selected" : "") + R"rawliteral(>Continuos Signal</option>
           </select><br><br>
 
@@ -752,7 +751,7 @@ ApiResult sendApiRequest(JsonDocument& payload, const String& route) {
   payload["production_order_code"] = PRODUCTION_ORDER;
   payload["rssi"] = WiFi.RSSI();
 
-  String protocol = (ENABLE_HTTPS == "1") ? "https://" : "http://";
+	String protocol = (ENABLE_HTTPS == "1") ? "https://" : "http://";
 	String requestUrl = protocol + SERVER_IP + ":" + SERVER_PORT + "/" + route;
 
 	HTTPClient http;
@@ -1330,50 +1329,6 @@ void loop() {
         previousPartMillis = currentMillis;
       }
 
-      // --- Pulse Signal + Linked Steps ---
-      else if (SENSOR_READ_TYPE == "pulse_signal_linked") {
-
-        if (step == 0) {
-          sysPrintln("Peça passou pelo primeiro estágio do modo step!");
-
-          StaticJsonDocument<1024> payload;
-          payload["method_key"] = "insert_data";
-          payload["status"] = "1";
-          payload["production_note_type"] = "1";
-
-          ApiResult result = sendApiRequest(payload, "api/");
-          handleSimpleApiResult(result, false);
-
-          step = 1;
-          previousPartMillis = currentMillis;
-        }
-
-        else if (step == 1) {
-          sysPrintln("Última peça não conforme pelo modo step!");
-
-          StaticJsonDocument<1024> payload;
-          ApiResult result;
-
-          payload["method_key"] = "insert_data";
-          payload["status"] = "0";
-          payload["production_note_type"] = "1";
-          result = sendApiRequest(payload, "api/");
-          handleSimpleApiResult(result, false);
-
-          payload.clear();
-
-          sysPrintln("Peça passou pelo primeiro estágio do modo step!");
-          payload["method_key"] = "insert_data";
-          payload["status"] = "1";
-          payload["production_note_type"] = "1";
-          result = sendApiRequest(payload, "api/");
-          handleSimpleApiResult(result, false);
-
-          step = 1;
-          previousPartMillis = currentMillis;
-        }
-      }
-
       // --- Continuos Signal ---
       else if (SENSOR_READ_TYPE == "continuos_signal") {
         if (lastSignalState == false) {
@@ -1398,21 +1353,33 @@ void loop() {
     }
 
     // ========================================
-    // MARK: LEITURA DO SENSOR 2
+    // MARK: LEITURA DO SENSOR 2 (Refugo Automático)
     // ========================================
     if (sensorState2 == LOW && currentMillis - previousPartMillis >= SENSOR_INTERVAL.toInt()) {
-      if (SENSOR_READ_TYPE == "pulse_signal_linked") {
-        if (step == 1) {
-          sysPrintln("Peça passou pela verificação do step!");
-          step = 0;
-        }
-        else if (step == 0) {
-          sysPrintln("Não passou pela primeira etapa!");
-        }
+      sysPrintln("Sensor 2 acionado: Apontando 1 peça Não Conforme automaticamente!");
+
+      // Seleciona o PN atual. Se não tiver nenhum, aborta.
+      String targetPN = "";
+      if (PART_NUMBERS_COUNT > 0) {
+        targetPN = String(PART_NUMBERS[CURRENT_PN_INDEX].id);
       }
-      else {
-        sysPrintln("Sensor 2 ignorado: modo pulse_signal_linked desligado.");
+
+      if (targetPN != "") {
+        StaticJsonDocument<1024> payload;
+        payload["method_key"] = "insert_data";
+        payload["status"] = "0";
+        payload["production_note_type"] = "1"; // 1 significa Automático (sensor)
+        payload["quantity"] = "1";
+        payload["part_number"] = targetPN;
+
+        ApiResult result = sendApiRequest(payload, "api/");
+        handleSimpleApiResult(result, false);
+      } else {
+         sysPrintln("Falha: Nenhum Part Number ativo para apontar refugo.");
+         drawCenteredText("No PN active\nfor scrap!", 1);
+         previousMessageMillis = currentMillis;
       }
+      
       previousPartMillis = currentMillis;
     }
 
