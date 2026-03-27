@@ -68,15 +68,10 @@ template <typename T>
 void sysPrint(T msg) {
   Serial .print(msg);
   if (ENABLE_TELNET == "1" && telnetClient && telnetClient.connected()) {
-    telnetClient.print(msg);
-  }
-}
-
-template <typename T>
-void sysPrintln(T msg) {
-  Serial .println(msg);
-  if (ENABLE_TELNET == "1" && telnetClient && telnetClient.connected()) {
-    telnetClient.println(msg);
+    String tStr = String(msg);
+    tStr.replace("\r\n", "\n"); // Normaliza
+    tStr.replace("\n", "\r\n"); // Força o retorno de carro
+    telnetClient.print(tStr);
   }
 }
 
@@ -85,6 +80,12 @@ void sysPrintln() {
   if (ENABLE_TELNET == "1" && telnetClient && telnetClient.connected()) {
     telnetClient.println();
   }
+}
+
+template <typename T>
+void sysPrintln(T msg) {
+  sysPrint(msg);
+  sysPrintln();
 }
 
 void sysPrintf(const char *format, ...) {
@@ -205,6 +206,7 @@ Adafruit_SSD1306* display = nullptr; // ponteiro, instanciado após carregar con
 
 // Variável para indicar quando o display está disponível para ser atualizado
 bool displayEnabled = true; 
+String lastDisplayedText = "";
 
 // Keypad Configuração
 #define ROW_NUM     4 // Quatro linhas
@@ -610,6 +612,12 @@ void initDisplay() {
 }
 
 void drawCenteredText(const char* text, uint8_t textSize) {
+  String newText = String(text);
+  if (newText != lastDisplayedText) {
+    sysPrintln("\n[DISPLAY]:\n" + newText + "\n-----------------");
+    lastDisplayedText = newText;
+  }
+
   display->clearDisplay();
   display->setTextSize(textSize);
   display->setTextColor(WHITE);
@@ -660,6 +668,11 @@ void drawMainView() {
         }
     } else {
         fullString += "PN (0/0/0):";
+    }
+
+    if (fullString != lastDisplayedText) {
+      sysPrintln("\n[DISPLAY MAIN]:\n" + fullString + "-----------------");
+      lastDisplayedText = fullString;
     }
 
     char textBuffer[256];
