@@ -616,7 +616,8 @@ ApiResult sendApiRequest(JsonDocument& payload, const String& route) {
   payload["production_order_code"] = PRODUCTION_ORDER;
   payload["rssi"] = WiFi.RSSI();
 
-	String requestUrl = "http://" + SERVER_IP + ":" + SERVER_PORT + "/" + route;
+	String requestUrl = "https://" + SERVER_IP + ":" + SERVER_PORT + "/" + route;
+  // String requestUrl = "http://" + SERVER_IP + "/" + route;
 
 	HTTPClient http;
 	if (!http.begin(requestUrl)) {
@@ -952,11 +953,6 @@ void sync_workstation(){
   ApiResult result = sendApiRequest(payload, "sync_workstation/");
   Serial.println("SYNC WORKSTATION RESULT: " + String(result.httpCode));
 
-  // Log temporário para debug do zeramento
-  String rawSync;
-  serializeJson(result.json, rawSync);
-  Serial.println("SYNC RAW: " + rawSync);
-
   // Guarda se o JSON foi parseado com sucesso antes de processar.
   // Evita zerar variáveis locais quando a deserialização falha silenciosamente.
   if (result.httpCode > 0 && !result.hasJson) {
@@ -1014,6 +1010,10 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSave);
   server.begin();
+
+  // Inicializa previousInputMillis com o tempo atual para evitar que o
+  // timeout de 30s dispare logo após o boot (quando previousInputMillis = 0)
+  previousInputMillis = millis();
   
   sync_workstation();
 
@@ -1026,7 +1026,6 @@ void setup() {
   }
 }
 
-// MARK: LOOP
 void loop() {
 
   server.handleClient();
@@ -1101,15 +1100,55 @@ void loop() {
       }
   }
 
+  // Caso fique mais de 30 segundos no modo input, sai e zera apenas
+  // os dados do fluxo que estava ativo — sem tocar em OPERATION,
+  // PRODUCTION_ORDER, USER_CODE ou PART_NUMBERS globais.
   if (inputMode && currentMillis - previousInputMillis > inputModeInterval) {
 
-    resetAllInputModes();
     inputMode = false;
 
-    OPERATION = "";
-    PRODUCTION_ORDER = "";
-    USER_CODE = "";
-    clearPartNumbers();
+    // Fluxo A
+    if (nonConfirmingPartsTypeInputMode || nonConfirmingPartsQuantInputMode) {
+      nonConfirmingPartsTypeInputMode = false;
+      nonConfirmingPartsQuantInputMode = false;
+      nonConfirmingPartsTypeCode = "";
+      nonConfirmingPartsQuant = "";
+    }
+
+    // Fluxo B
+    if (deletePartsTypeInputMode || deletePartsQuantInputMode) {
+      deletePartsTypeInputMode = false;
+      deletePartsQuantInputMode = false;
+      deletePartsTypeCode = "";
+      deletePartsQuant = "";
+    }
+
+    // Fluxo C
+    if (operatorInputMode) {
+      operatorInputMode = false;
+      USER_CODE = "";
+    }
+
+    // Fluxo D — FIX 1: partsQuantityPerPNInputMode incluído
+    if (operationInputMode || workOrderInputMode || partsToProdInputMode || partsQuantityPerPNInputMode) {
+      operationInputMode = false;
+      workOrderInputMode = false;
+      partsToProdInputMode = false;
+      partsQuantityPerPNInputMode = false;
+      currentPNInputIndex = 0;
+      for (int i = 0; i < MAX_PART_NUMBERS; i++) {
+        partsQuantityPerPN[i] = 0;
+      }
+      OPERATION = "";
+      PRODUCTION_ORDER = "";
+      clearPartNumbers();
+    }
+
+    // Fluxo #
+    if (interventionInputMode) {
+      interventionInputMode = false;
+      interventionCode = "";
+    }
   }
 
   int sensorState1 = digitalRead(SENSOR_PIN_1);
@@ -1130,7 +1169,9 @@ void loop() {
   }
   else if (currentWorkStationState == RUNNING) {
 
-    if (currentMillis - previousMessageMillis > message_interval && !inputMode && starKeyPressedMillis == 0) {
+    if (currentMillis - previousMessageMillis > message_interval  && !inputMode 
+                                                                  && starKeyPressedMillis == 0 
+                                                                  && zeroKeyPressedMillis == 0) {
         drawMainView();
     }
 
